@@ -1,0 +1,20 @@
+[Unit]
+Description=Deliver ai-dev stage handoffs to the originating Hermes conversation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+Environment=HOME=/home/hermes
+Environment=PATH=/home/hermes/.local/bin:/home/hermes/.hermes/hermes-agent/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/hermes/.local/bin/ai-dev-card notifications --watch
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

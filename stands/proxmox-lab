@@ -1,0 +1,131 @@
+#!/usr/bin/python3 -I
+"""Broker four power/test verbs against operator-pinned QEMU guests."""
+import base64
+import json
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+
+class Lab:
+    def __init__(self, cfg, vmid):
+        self.cfg = cfg
+        self.identity = cfg["guests"][vmid]
+        self.prefix = cfg["api"] + "/api2/json/nodes/" + cfg["node"] + "/qemu/" + vmid + "/"
+
+    def api(self, resource, data=None):
+        args = ["/usr/bin/curl", "-q", "--silent", "--show-error", "--fail-with-body", "--noproxy", "*",
+                "--connect-timeout", "5", "--max-time", "25", "--cacert", self.cfg["ca"], "--resolve",
+                self.cfg["resolve"], "--header", "@" + self.cfg["authorization"]]
+        if data is not None:
+            args.extend(["--header", "Content-Type: application/json", "--data-binary", "@-"])
+        body = json.dumps(data).encode() if data is not None else b""
+        response = subprocess.run([*args, self.prefix + resource], input=body, capture_output=True,
+                                  env={"LANG": "C", "PATH": "/usr/bin:/bin"})
+        if response.returncode:
+            raise ValueError(response.stderr.decode(errors="replace").strip() + " " +
+                             response.stdout.decode(errors="replace").strip())
+        return json.loads(response.stdout)["data"]
+
+    def verify(self):
+        config = self.api("config?current=1")
+        smbios = dict(item.split("=", 1) for item in config["smbios1"].split(",") if "=" in item)
+        if config["name"] != self.identity["name"] or smbios.get("uuid") != self.identity["uuid"]:
+            raise ValueError("Registered guest name or UUID differs from the live VM.")
+
+    def status(self):
+        return self.api("status/current")["status"]
+
+    def power(self, action):
+        if action == "status":
+            print(self.status())
+            return
+        wanted = "running" if action == "start" else "stopped"
+        if self.status() != wanted:
+            self.api("status/" + action, {})
+            deadline = time.monotonic() + 180
+            while self.status() != wanted:
+                if time.monotonic() >= deadline:
+                    raise ValueError("Guest did not reach " + wanted)
+                time.sleep(2)
+        print(wanted)
+
+    def test(self, argv):
+        if self.status() != "running":
+            raise ValueError("Guest is stopped. Start it before testing.")
+        # Encode argv to preserve literal values through systemd's ExecStart expansion.
+        encoded = base64.b64encode(json.dumps(argv).encode()).decode()
+        name = self.cfg["guest_user"]
+        state = self.cfg["state_directory"]
+        work = "/var/lib/" + state
+        launch = ("import base64,json,os,sys\n"
+                  "if os.getuid() == 0 or os.getgid() == 0 or set(os.getgroups()) - {os.getgid()}:\n"
+                  "    sys.exit('Guest test identity has unexpected privileges.')\n"
+                  "argv=json.loads(base64.b64decode(sys.argv[1]))\n"
+                  "os.execvp(argv[0],argv)")
+        command = [
+            "/usr/bin/systemd-run", "--quiet", "--wait", "--pipe", "--collect", "--service-type=exec",
+            "--uid=" + name, "--property=StateDirectory=" + state,
+            "--property=StateDirectoryMode=0700", "--property=WorkingDirectory=" + work,
+            "--setenv=HOME=" + work, "--property=NoNewPrivileges=yes", "--property=CapabilityBoundingSet=",
+            "--property=PrivateDevices=yes", "--property=ProtectHome=yes", "--property=ProtectSystem=strict",
+            "--property=PrivateTmp=yes", "--property=RestrictNamespaces=yes", "--property=RestrictSUIDSGID=yes",
+            "--property=ProtectKernelTunables=yes", "--property=ProtectKernelModules=yes",
+            "--property=ProtectControlGroups=yes", "--property=IPAddressDeny=any",
+            "--property=IPAddressAllow=localhost", "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+            "--property=RuntimeMaxSec=900", "--property=TasksMax=256", "--", "/usr/bin/python3", "-I", "-c",
+            launch, encoded,
+        ]
+        deadline = time.monotonic() + 180
+        while True:
+            try:
+                pid = int(self.api("agent/exec", {"command": command})["pid"])
+                break
+            except ValueError as error:
+                if "guest agent is not running" not in str(error).lower() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(2)
+        deadline = time.monotonic() + 930
+        while True:
+            result = self.api("agent/exec-status?pid=" + str(pid))
+            if result["exited"]:
+                for key, stream in (("out", sys.stdout), ("err", sys.stderr)):
+                    stream.write(result.get(key + "-data", ""))
+                    if result.get(key + "-truncated"):
+                        print("Guest " + key + "put was truncated.", file=sys.stderr)
+                return result.get("exitcode", 128 + result.get("signal", 1))
+            if time.monotonic() >= deadline:
+                raise ValueError("Guest test exceeded its execution deadline.")
+            time.sleep(1)
+
+
+def main(args):
+    usage = f"Usage: {Path(sys.argv[0]).name} VMID status|start|shutdown|test [--] COMMAND [ARG...]"
+    if len(args) < 2:
+        raise ValueError(usage)
+    vmid, action, *argv = args
+    if action == "test" and argv[:1] == ["--"]:
+        argv = argv[1:]
+    if action not in ("start", "shutdown", "status", "test") or (action == "test") != bool(argv):
+        raise ValueError(usage)
+    cfg = json.loads(Path(__file__ + ".json").read_text())
+    if vmid not in cfg["guests"]:
+        raise ValueError("Guest ID is outside the configured lab.")
+    lab = Lab(cfg, vmid)
+    allowed = lab.identity.get("operations", ["start", "shutdown", "status", "test"])
+    if (not isinstance(allowed, list) or action not in allowed
+            or any(verb not in ("start", "shutdown", "status", "test") for verb in allowed)):
+        raise ValueError("Operation is outside this guest's grant.")
+    lab.verify()
+    if action == "test":
+        return lab.test(argv)
+    lab.power(action)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, KeyError, ValueError) as exc:
+        sys.exit("Lab failed: " + str(exc))

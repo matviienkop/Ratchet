@@ -1,0 +1,49 @@
+#!/usr/bin/python3 -I
+"""Expose an operator-registered guest through its existing restricted lab broker."""
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+
+def main(args, cfg):
+    allowed = cfg.get("operations", [])
+    verbs = {"status", "start", "shutdown", "test"}
+    if cfg.get("maintenance"):
+        verbs.update(("reset", "reinstall", "restore-previous"))
+    if not isinstance(allowed, list) or not allowed or any(v not in verbs for v in allowed):
+        raise ValueError("Invalid lab guest operation list.")
+    if args == ["operations"]:
+        print(json.dumps(sorted(set(allowed))))
+        return 0
+    if not args or args[0] not in allowed:
+        raise ValueError("Operation is outside this guest's grant.")
+    action, *rest = args
+    if (action == "test" and (len(rest) < 2 or rest[0] != "--")) or (action != "test" and rest):
+        raise ValueError("Use test -- COMMAND [ARG...] or a single power/status operation.")
+    if action in ("reset", "reinstall", "restore-previous"):
+        transport = Path(cfg["maintenance"])
+        if rest or not transport.is_absolute() or transport != transport.resolve():
+            raise ValueError("Maintenance takes one verb through a fixed transport")
+        for path in (*transport.parents, transport):
+            info = path.lstat()
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError("Untrusted maintenance transport")
+        if not transport.is_file():
+            raise ValueError("Maintenance transport is not a regular file")
+        return subprocess.run([str(transport), action], stdin=subprocess.DEVNULL,
+                              cwd="/", env={"PATH": "/usr/bin:/bin", "LANG": "C"}).returncode
+    broker, vmid = cfg["broker"], str(cfg["vmid"])
+    if not Path(broker).is_absolute() or not vmid.isdecimal():
+        raise ValueError("The lab requires an absolute broker path and numeric guest ID.")
+    return subprocess.run([broker, vmid, action, *rest], stdin=subprocess.DEVNULL).returncode
+
+
+if __name__ == "__main__":
+    try:
+        path = Path(__file__ + ".json")
+        if path.is_symlink() or path.stat().st_uid or path.stat().st_mode & 0o022:
+            raise ValueError("Install a root-owned, non-writable lab stand configuration.")
+        sys.exit(main(sys.argv[1:], json.loads(path.read_text())))
+    except (OSError, KeyError, ValueError) as error:
+        sys.exit("Stand failed: " + str(error))

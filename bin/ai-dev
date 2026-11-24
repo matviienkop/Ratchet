@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Create a project workspace and verify its declared Git checkouts."""
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+
+class RegistrationError(Exception):
+    pass
+
+
+def read_manifest(path):
+    with path.open(encoding="utf-8") as stream:
+        return validate_manifest(json.load(stream))
+
+
+def validate_path(path):
+    if not isinstance(path, str) or not all(
+        re.fullmatch(r"(?!\.git$)\.?[a-zA-Z0-9_][a-zA-Z0-9_.+-]*", part, re.I) for part in path.split("/")
+    ):
+        raise RegistrationError("Each checkout requires a relative path of directory names.")
+
+
+def validate_manifest(manifest):
+    if not isinstance(manifest, dict):
+        raise RegistrationError("The manifest must be an object.")
+    slug = manifest.get("project")
+    validate_slug(slug)
+    if not isinstance(manifest.get("description", ""), str):
+        raise RegistrationError("Project description must be text.")
+    name = manifest.get("name", slug)
+    if not isinstance(name, str) or not name.strip():
+        raise RegistrationError("Project name must be text.")
+    repositories = manifest.setdefault("repositories", [])
+    if not isinstance(repositories, list):
+        raise RegistrationError("repositories must be a list.")
+    paths = set()
+    for item in repositories:
+        if not isinstance(item, dict):
+            raise RegistrationError("Each repository must have a URL and checkout path.")
+        path = item.get("path")
+        validate_path(path)
+        if path in paths:
+            raise RegistrationError(f"Duplicate checkout path: {path}")
+        paths.add(path)
+        url = item.get("url")
+        if not isinstance(url, str) or not re.fullmatch(
+            r"(?:git@[A-Za-z0-9][A-Za-z0-9.-]*:|(?:https://|ssh://git@)"
+            r"[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?/)"
+            r"(?:\.?[A-Za-z0-9_~][A-Za-z0-9_.~+-]*/)*\.?[A-Za-z0-9_~][A-Za-z0-9_.~+-]*", url
+        ):
+            raise RegistrationError(f"{path}: use a credential-free HTTPS or Git SSH URL.")
+    tasks = manifest.setdefault("tasks", {"provider": "internal"})
+    if not isinstance(tasks, dict) or not isinstance(tasks.get("provider"), str) or not tasks["provider"].strip():
+        raise RegistrationError("tasks.provider must be a nonempty provider name.")
+    return manifest
+
+
+def validate_slug(slug):
+    if not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug):
+        raise RegistrationError("project must be a lowercase identifier using letters, numbers, hyphens or underscores.")
+
+
+def check_path(path):
+    if path.resolve() != path or path.is_symlink():
+        raise RegistrationError(f"Symlink at or above {path.name}.")
+
+
+def write_manifest(path, data):
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+    try:
+        temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def git(*args, cwd=None):
+    command = ["git", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", *args]
+    environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+    result = subprocess.run(
+        command, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+    )
+    if result.returncode:
+        # A credential helper or URL rewrite can include credentials in stderr.
+        details = result.stderr.lower()
+        if "permission denied" in details or "authentication" in details:
+            reason = "authentication or authorization failed"
+        elif "not found" in details or "does not appear to be a git repository" in details:
+            reason = "repository or reference unavailable"
+        elif "host key verification failed" in details:
+            reason = "SSH host key verification failed"
+        else:
+            reason = f"Git exited with status {result.returncode}"
+        raise RegistrationError(f"{args[0]}: {reason}")
+    return result.stdout.rstrip("\n")
+
+
+def verify_checkout(target, expected_url):
+    marker = target / ".git"
+    if not marker.is_dir() or marker.is_symlink():
+        raise RegistrationError("Destination exists and is not an independent clone.")
+    if Path(git("rev-parse", "--show-toplevel", cwd=target)).resolve() != target:
+        raise RegistrationError("Checkout root mismatch.")
+    # Keep the declared origin even when a trusted local Git config rewrites its transport.
+    if git("config", "--local", "--get-all", "remote.origin.url", cwd=target) != expected_url:
+        raise RegistrationError("Existing checkout has a different origin.")
+    try:
+        revision = git("rev-parse", "--verify", "HEAD^{commit}", cwd=target)
+    except RegistrationError:
+        head = git("symbolic-ref", "HEAD", cwd=target)
+        if not head.startswith("refs/heads/") or git("for-each-ref", "--count=1", "--format=%(refname)", cwd=target):
+            raise RegistrationError("Checkout HEAD does not resolve to a commit.")
+        # Ref enumeration can skip broken refs. Check connectivity before accepting an unborn branch.
+        git("fsck", "--connectivity-only", "--no-dangling", cwd=target)
+        return {"status": "empty", "revision": None}
+    return {"status": "ready", "revision": revision}
+
+
+def inspect_checkout(base, item, ready):
+    relative = Path(item["path"])
+    target = base / relative
+    check_path(target)
+    pinned = None
+    for parent in relative.parents:
+        if parent not in ready:
+            marker = base / parent / ".git"
+            if marker.exists() or marker.is_symlink():
+                raise RegistrationError(f"Parent checkout {parent} is outside the project membership.")
+            continue
+        if not ready[parent]:
+            raise RegistrationError(f"Parent checkout {parent} is incomplete.")
+        subpath = str(relative.relative_to(parent))
+        tracked = git("ls-files", "--stage", "--", subpath, cwd=base / parent)
+        if tracked:
+            gitlink = re.fullmatch(r"160000 ([a-f0-9]{40,64}) 0\t" + re.escape(subpath), tracked)
+            if not gitlink:
+                raise RegistrationError(f"Parent checkout {parent} tracks the destination.")
+            pinned = gitlink.group(1)
+    # Git creates an empty directory for each uninitialized submodule.
+    empty_gitlink = pinned and target.is_dir() and not any(target.iterdir())
+    if target.exists() and not empty_gitlink:
+        checkout = verify_checkout(target, item["url"])
+        if pinned and checkout["revision"] != pinned:
+            raise RegistrationError("Existing checkout differs from its parent repository's pinned Git revision.")
+        return checkout, pinned, empty_gitlink
+    return None, pinned, empty_gitlink
+
+
+def process_checkout(base, item, ready, create):
+    checkout, pinned, empty_gitlink = inspect_checkout(base, item, ready)
+    if checkout is not None:
+        return checkout
+    target = base / item["path"]
+    if not create:
+        raise RegistrationError("Checkout is missing.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".ai-dev-clone-", dir=target.parent) as temporary:
+        staging = Path(temporary) / "checkout"
+        git("clone", "--no-local", "--no-recurse-submodules", "--", item["url"], str(staging))
+        if pinned:
+            git("checkout", "--detach", pinned, cwd=staging)
+        checkout = verify_checkout(staging, item["url"])
+        if target.is_symlink() or (target.exists() and not empty_gitlink):
+            raise RegistrationError("Destination appeared while cloning.")
+        staging.rename(target)
+    return checkout
+
+
+def inspect_repositories(project, manifest, create):
+    items = []
+    ready = {}
+    for repo in sorted(manifest["repositories"], key=lambda item: len(Path(item["path"]).parts)):
+        path = Path(repo["path"])
+        entry = {"path": str(path), "url": repo["url"]}
+        try:
+            entry.update(process_checkout(project / "repos", repo, ready, create))
+        except (RegistrationError, OSError) as error:
+            entry.update(status="pending", error=str(error))
+        ready[path] = entry["status"] in ("ready", "empty")
+        items.append(entry)
+    return {
+        "scope": "checkouts", "project": project.name, "project_dir": str(project),
+        "repositories": items, "complete": all(ready.values()), "verified": sum(ready.values()),
+        "total": len(items), "task_provider": manifest["tasks"]["provider"],
+    }
+
+
+def change_membership(args, project, manifest):
+    repos = manifest["repositories"]
+    base = project / "repos"
+    path = args.path
+    if args.action == "repo-add" and path is None:
+        matches = [repo["path"] for repo in repos if repo["url"] == args.url]
+        if len(matches) > 1:
+            raise RegistrationError("Multiple checkouts use this origin. Supply --path.")
+        path = matches[0] if matches else re.split(r"[/:]", args.url)[-1].removesuffix(".git")
+    validate_path(path)
+    entry = next((repo for repo in repos if repo["path"] == path), None)
+    result = {
+        "scope": "membership", "project": project.name, "project_dir": str(project),
+        "operation": args.action, "path": path, "changed": False, "total": len(repos),
+        "complete": True,
+    }
+    if args.action == "repo-remove":
+        if entry:
+            if any(Path(path) in Path(repo["path"]).parents for repo in repos):
+                raise RegistrationError("Unregister nested member checkouts before removing their parent.")
+            repos.remove(entry)
+            write_manifest(project / "project.yaml", manifest)
+            result.update(changed=True, total=len(repos))
+        result.update(status="unregistered", checkout_retained=os.path.lexists(base / path))
+        return result
+
+    if entry and (entry["url"] != args.url or
+                  (args.role is not None and entry.get("role") != args.role)):
+        raise RegistrationError("Checkout path is registered with a different origin or role.")
+    if entry is None:
+        if any(repo["url"] == args.url for repo in repos):
+            raise RegistrationError("This origin is already registered at a different path.")
+        entry = {"path": path, "url": args.url}
+        if args.role is not None:
+            entry["role"] = args.role
+        repos.append(entry)
+        validate_manifest(manifest)
+        new_member = True
+    else:
+        new_member = False
+    ready = {}
+    ancestors = {str(parent) for parent in Path(path).parents}
+    for parent in sorted((repo for repo in repos if repo["path"] in ancestors),
+                         key=lambda repo: len(Path(repo["path"]).parts)):
+        parent_path = Path(parent["path"])
+        process_checkout(base, parent, ready, create=False)
+        ready[parent_path] = True
+    # Inspect retained checkouts before committing their membership.
+    checkout, _, _ = inspect_checkout(base, entry, ready)
+    if checkout is None and any(Path(path) in Path(repo["path"]).parents for repo in repos):
+        raise RegistrationError("Destination contains registered descendants. Add only a verified existing parent.")
+    if new_member:
+        write_manifest(project / "project.yaml", manifest)
+        result.update(changed=True, total=len(repos))
+    try:
+        result.update(checkout or process_checkout(base, entry, ready, create=True))
+    except (OSError, RegistrationError) as error:
+        result.update(complete=False, status="pending", error=str(error))
+    return result
+
+
+def run(args):
+    if not args.workspace:
+        raise RegistrationError("Set AI_DEV_WORKSPACE or supply --workspace.")
+    root = Path(args.workspace).expanduser().resolve()
+    create = args.action == "create"
+    if create:
+        requested = read_manifest(args.manifest)
+        slug = requested["project"]
+    else:
+        slug = args.project
+        validate_slug(slug)
+    project = root / slug
+    check_path(project)
+    if create:
+        project.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(project, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH if args.action == "status" else fcntl.LOCK_EX)
+        manifest_path = project / "project.yaml"
+        check_path(manifest_path)
+        if manifest_path.exists():
+            manifest = read_manifest(manifest_path)
+            if manifest["project"] != slug:
+                raise RegistrationError("Stored project identifier disagrees with its directory.")
+            if create and any(manifest.get(key) != value for key, value in requested.items()):
+                raise RegistrationError("Manifest conflicts with the existing project; its settings were preserved.")
+        elif create:
+            manifest = requested
+            write_manifest(manifest_path, manifest)
+        else:
+            raise RegistrationError("No project manifest found.")
+        folders = ["repos", "rules"]
+        if manifest["tasks"]["provider"] == "internal":
+            folders.append("tasks")
+        for name in folders:
+            folder = project / name
+            check_path(folder)
+            if create:
+                folder.mkdir(exist_ok=True)
+            if not folder.is_dir():
+                raise RegistrationError(f"Missing project directory: {name}")
+        if args.action in ("repo-add", "repo-remove"):
+            return change_membership(args, project, manifest)
+        return inspect_repositories(project, manifest, create)
+    finally:
+        os.close(fd)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    actions = commands.add_parser("project").add_subparsers(dest="action", required=True)
+    create = actions.add_parser("create", help="set up or resume a declared project")
+    create.add_argument("--manifest", type=Path, required=True, help="project manifest in JSON")
+    status = actions.add_parser("status", help="verify the local checkouts without fetching")
+    add = actions.add_parser("repo-add", help="register or resume one repository checkout")
+    add.add_argument("--url", required=True, help="credential-free HTTPS or Git SSH source URL")
+    add.add_argument("--path", help="relative checkout path under repos/ (defaults to existing match or repository name)")
+    add.add_argument("--role", help="role of this repository in the project")
+    remove = actions.add_parser("repo-remove", help="unregister a checkout while retaining its files")
+    remove.add_argument("--path", required=True, help="exact registered checkout path under repos/")
+    for action in (status, add, remove):
+        action.add_argument("--project", required=True, help="project identifier")
+    for action in (create, status, add, remove):
+        action.add_argument("--workspace", default=os.environ.get("AI_DEV_WORKSPACE"))
+    args = parser.parse_args()
+    try:
+        report = run(args)
+    except (RegistrationError, OSError, ValueError) as error:
+        print(json.dumps({"complete": False, "error": str(error)}, ensure_ascii=False))
+        return 2
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0 if report["complete"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

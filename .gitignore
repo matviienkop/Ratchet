@@ -1,0 +1,20 @@
+/codex-session
+
+# Local credentials and runtime state
+.env
+.env.*
+!.env.example
+/.aws/
+/.codex/
+/.hermes/
+/runtime/
+/workspaces/
+/secrets/
+*.log
+
+# Local caches
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+.DS_Store

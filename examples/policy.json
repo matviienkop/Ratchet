@@ -1,0 +1,19 @@
+{
+  "defaults": {
+    "check_timeout": 900,
+    "max_defect_failures": 6,
+    "review": {"max_rounds": 3, "reviewer": "reviewer"}
+  },
+  "repos": {
+    "git@github.com:example/backend.git": {
+      "project": "example",
+      "target_branch": "origin/main",
+      "delivery": "pr",
+      "checks": [
+        {"name": "unit", "argv": ["make", "test"]},
+        {"name": "lint", "argv": ["make", "lint"], "timeout": 300},
+        {"name": "stand", "argv": ["make", "check", "check-race"], "stage": "post_review", "stand": "ubuntu-amd64", "timeout": 3600}
+      ]
+    }
+  }
+}

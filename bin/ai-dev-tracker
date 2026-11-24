@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Read a scoped tracker ticket and synchronize its native Kanban card."""
+from contextlib import closing
+import argparse
+import base64
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import sys
+from urllib.parse import quote
+
+from ai_dev_tracker_sync import watch
+from ai_dev_board import DEFAULT_STATUSES, REPOSITORY, github_for, sync_board
+
+
+def request(host, auth, path, method="GET", payload=None):
+    if not re.fullmatch(r"[ -~]+", auth):
+        raise ValueError("Invalid project credential format")
+    conn = http.client.HTTPSConnection(host, timeout=30)
+    headers = {"Authorization": auth, "Accept": "application/json", "User-Agent": "ai-dev-tracker",
+               "Content-Type": "application/json"}
+    try:
+        conn.request(method, path, json.dumps(payload) if payload is not None else None, headers)
+        response = conn.getresponse()
+        if not 200 <= response.status < 300:
+            raise ValueError(f"{host} returned HTTP {response.status}")
+        body = response.read()
+        return json.loads(body) if body else {}
+    finally:
+        conn.close()
+
+
+def credential(project, name):
+    path = Path.home() / ".config/ai-dev/credentials" / project.name / name
+    if path.resolve() != path or not path.is_file() or path.stat().st_mode & 0o077:
+        raise ValueError(f"Missing private project credential {name}")
+    return path.read_text().strip()
+
+
+class Tracker:
+    def __init__(self, project):
+        self.project = project
+        manifest_path = project / "project.yaml"
+        if manifest_path.resolve() != manifest_path:
+            raise ValueError("Unexpected symlink in project manifest")
+        manifest = json.loads(manifest_path.read_text())
+        if manifest["project"] != project.name or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project.name):
+            raise ValueError("Invalid registered project")
+        self.tasks = manifest["tasks"]
+        self.scope = self.tasks.get("scope", {})
+        self.provider = self.tasks["provider"]
+        self.destination = {
+            "github-issues": self.scope.get("repository", "").lower(),
+            "jira": self.scope.get("site", "").rstrip("/") + "/" + self.scope.get("project_key", ""),
+            "linear": self.scope.get("team_key", ""),
+        }.get(self.provider, "")
+
+    def key(self, value):
+        if self.provider == "github-issues":
+            repo = self.scope.get("repository", "")
+            if not re.fullmatch(REPOSITORY, repo) or repo.split("/")[1] in (".", ".."):
+                raise ValueError("Configure tasks.scope.repository")
+            match = re.fullmatch(re.escape(repo) + r"#([1-9][0-9]*)", value, re.I)
+            if match:
+                return f"{repo}#{match[1]}"
+        elif self.provider in ("linear", "jira"):
+            field = "team_key" if self.provider == "linear" else "project_key"
+            prefix = self.scope.get(field, "")
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*", prefix) and re.fullmatch(prefix + r"-[1-9][0-9]*", value):
+                return value
+        raise ValueError("Ticket outside registered tracker scope or invalid tracker configuration")
+
+    def linear(self, query, **variables):
+        response = request("api.linear.app", credential(self.project, "linear-token"),
+                           "/graphql", "POST", {"query": query, "variables": variables})
+        if response.get("errors") or not isinstance(response.get("data"), dict):
+            raise ValueError("Linear rejected the operation")
+        return response["data"]
+
+    def jira(self, suffix, method="GET", payload=None, *, resource="issue/"):
+        host = self.scope.get("site", "").removeprefix("https://").rstrip("/")
+        creds = json.loads(credential(self.project, "jira.json"))
+        if not re.fullmatch(r"[a-z0-9-]+\.atlassian\.net", host) or creds["site"] != "https://" + host:
+            raise ValueError("Jira tenant must match project credential")
+        auth = base64.b64encode(f"{creds['email']}:{creds['token']}".encode()).decode()
+        return request(host, "Basic " + auth, "/rest/api/3/" + resource + suffix, method, payload)
+
+    def candidates(self, limit):
+        if not 1 <= limit <= 100:
+            raise ValueError("Ticket list limit must be between 1 and 100")
+        if self.provider == "github-issues":
+            repo = self.scope.get("repository", "")
+            self.key(repo + "#1")
+            owner, name = repo.split("/")
+            repository = github_for(self.project.name).query("""query($o:String!,$r:String!,$n:Int!){
+                repository(owner:$o,name:$r){nameWithOwner issues(states:[OPEN],first:$n,
+                orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number title url} pageInfo{hasNextPage}}}}""",
+                o=owner, r=name, n=limit)["repository"]
+            if not repository or repository["nameWithOwner"].lower() != repo.lower():
+                raise ValueError("GitHub project scope changed")
+            page = repository["issues"]
+            items = [dict(key=f"{repo}#{i['number']}", title=i["title"], url=i["url"]) for i in page["nodes"]]
+            more = page["pageInfo"]["hasNextPage"]
+        elif self.provider == "linear":
+            team = self.scope.get("team_key", "")
+            self.key(team + "-1")
+            page = self.linear("""query($team:String!,$n:Int!){issues(first:$n,orderBy:updatedAt,
+                filter:{team:{key:{eq:$team}},state:{type:{nin:["completed","canceled"]}}}){
+                nodes{identifier title url} pageInfo{hasNextPage}}}""", team=team, n=limit)["issues"]
+            items = [dict(key=self.key(i["identifier"]), title=i["title"], url=i["url"]) for i in page["nodes"]]
+            more = page["pageInfo"]["hasNextPage"]
+        elif self.provider == "jira":
+            project = self.scope.get("project_key", "")
+            self.key(project + "-1")
+            page = self.jira("search/jql", "POST", {"jql": f'project = "{project}" AND statusCategory != Done ORDER BY updated DESC',
+                             "fields": ["summary"], "maxResults": limit}, resource="")
+            items = [dict(key=self.key(i["key"]), title=i["fields"]["summary"],
+                          url=i["self"].split("/rest/")[0] + "/browse/" + i["key"]) for i in page["issues"]]
+            more = bool(page.get("nextPageToken"))
+        else:
+            raise ValueError("Use Hermes Kanban list for the internal board")
+        return {"tickets": items, "more_available": more}
+
+    def read(self, ticket):
+        key = self.key(ticket)
+        comments = []
+        if self.provider == "github-issues":
+            repo, number = key.split("#")
+            api = github_for(self.project.name)
+            after = None
+            while True:
+                result = api.query("""query($owner:String!,$repo:String!,$number:Int!,$after:String){
+                  repository(owner:$owner,name:$repo){nameWithOwner issue(number:$number){
+                  id title body state url comments(first:100,after:$after){
+                  nodes{id body author{login}} pageInfo{hasNextPage endCursor}}}}}""",
+                                   owner=repo.split("/")[0], repo=repo.split("/")[1], number=int(number), after=after)
+                repository = result["repository"]
+                if not repository or repository["nameWithOwner"].lower() != repo.lower() or not repository["issue"]:
+                    raise ValueError("GitHub issue unavailable or moved")
+                issue = repository["issue"]
+                page = issue["comments"]
+                comments.extend(page["nodes"])
+                if not page["pageInfo"]["hasNextPage"]:
+                    return dict(key=key, id=issue["id"], url=issue["url"], title=issue["title"],
+                                description=issue["body"], state=issue["state"], comments=comments)
+                after = page["pageInfo"]["endCursor"]
+        if self.provider == "linear":
+            after = None
+            while True:
+                issue = self.linear("""query($key:String!,$after:String){issue(id:$key){id identifier url
+                  title description state{name} comments(first:100,after:$after){nodes{id body user{name}}
+                  pageInfo{endCursor hasNextPage}}}}""", key=key, after=after)["issue"]
+                if not issue or issue["identifier"] != key:
+                    raise ValueError("Linear ticket unavailable or moved")
+                page = issue["comments"]
+                comments.extend(page["nodes"])
+                if not page["pageInfo"]["hasNextPage"]:
+                    return dict(key=key, id=issue["id"], url=issue["url"], title=issue["title"],
+                                description=issue["description"], state=issue["state"]["name"], comments=comments)
+                after = page["pageInfo"]["endCursor"]
+        issue = self.jira(key + "?fields=summary,description,status")
+        if issue["key"] != key:
+            raise ValueError("Jira ticket moved outside binding")
+        while True:
+            page = self.jira(key + "/comment?maxResults=100&startAt=" + str(len(comments)))
+            comments.extend({"id": c["id"], "author": c["author"].get("displayName"), "body": c["body"]}
+                            for c in page["comments"])
+            if len(comments) >= page["total"]:
+                break
+            if not page["comments"]:
+                raise ValueError("Incomplete Jira comment pagination")
+        fields = issue["fields"]
+        return dict(key=key, id=issue["id"], url=issue["self"].split("/rest/")[0] + "/browse/" + key,
+                    title=fields["summary"], description=fields["description"], state=fields["status"]["name"],
+                    comments=comments)
+
+    def stage(self, key, phase, expected_id):
+        key = self.key(key)
+        if self.scope.get("writes") not in (None, "explicit_authorization_only"):
+            raise ValueError("Project tracker writes disabled")
+        if self.provider == "github-issues":
+            # Issue numbers cannot be reused within a repository, but repository names can.
+            repo, number = key.split("#")
+            issue = github_for(self.project.name).query(
+                "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){id}}}",
+                o=repo.split("/")[0], r=repo.split("/")[1], n=int(number))["repository"]["issue"]
+            if not issue or issue["id"] != expected_id:
+                raise ValueError("Bound issue identity changed")
+            return sync_board(self.project, key, phase)
+        desired = self.tasks.get("status_mapping", {}).get(phase)
+        if not desired:
+            raise ValueError("Configure tasks.status_mapping for this phase before syncing")
+        if self.provider == "linear":
+            issue = self.linear("""query($key:String!){issue(id:$key){id identifier state{id name}
+               team{states(first:250){nodes{id name}}}}}""", key=key)["issue"]
+            if not issue or issue["identifier"] != key or issue["id"] != expected_id:
+                raise ValueError("Bound Linear issue identity changed")
+            matches = [s for s in issue["team"]["states"]["nodes"] if desired in (s["id"], s["name"])]
+            if len(matches) != 1:
+                raise ValueError("Unknown or ambiguous Linear state")
+            target = matches[0]["id"]
+            changed = issue["state"]["id"] != target
+            if changed:
+                receipt = self.linear("""mutation($id:String!,$state:String!){
+                issueUpdate(id:$id,input:{stateId:$state}){success issue{id state{id}}}}""",
+                                      id=expected_id, state=target)["issueUpdate"]
+                if not receipt["success"] or receipt["issue"] != {"id": expected_id, "state": {"id": target}}:
+                    raise ValueError("Linear did not confirm transition")
+        else:
+            issue = self.jira(key + "?fields=status")
+            if issue["id"] != expected_id or issue["key"] != key:
+                raise ValueError("Bound Jira issue identity changed")
+            changed = issue["fields"]["status"]["name"] != desired
+            if changed:
+                transitions = self.jira(quote(expected_id, safe="") + "/transitions")["transitions"]
+                matches = [t for t in transitions if t["to"]["name"] == desired]
+                if len(matches) != 1:
+                    raise ValueError("No unique Jira transition to configured destination")
+                self.jira(quote(expected_id, safe="") + "/transitions", "POST", {"transition": {"id": matches[0]["id"]}})
+                if self.jira(key + "?fields=status")["fields"]["status"]["name"] != desired:
+                    raise ValueError("Jira did not confirm transition")
+        return {"status": "confirmed", "changed": changed, "phase": phase}
+
+
+def run(project, args):
+    if args.action == "watch":
+        return watch(project, args, Tracker)
+    tracker = Tracker(project)
+    if args.action == "list":
+        return tracker.candidates(args.limit)
+    if args.action == "read":
+        return tracker.read(args.ticket)
+    if tracker.provider == "internal":
+        return {"status": "internal"}
+    path = project / ".tracker-bindings.sqlite3"
+    if path.resolve() != path:
+        raise ValueError("Unexpected symlink in tracker binding path")
+    with closing(sqlite3.connect(path, timeout=30)) as db, db:
+        db.execute("""CREATE TABLE IF NOT EXISTS bindings(board TEXT, card TEXT, provider TEXT,
+                   destination TEXT, ticket TEXT, remote_id TEXT, PRIMARY KEY(board,card), UNIQUE(provider,destination,ticket))""")
+        existing = db.execute("SELECT provider,destination,ticket,remote_id FROM bindings WHERE board=? AND card=?",
+                              (args.board, args.card)).fetchone()
+        if args.action == "bind":
+            ticket = tracker.read(args.ticket)
+            binding = (tracker.provider, tracker.destination, ticket["key"], ticket["id"])
+            db.execute("INSERT OR IGNORE INTO bindings VALUES (?,?,?,?,?,?)", (args.board, args.card, *binding))
+            actual = db.execute("SELECT provider,destination,ticket,remote_id FROM bindings WHERE board=? AND card=?",
+                                (args.board, args.card)).fetchone()
+            if actual != binding:
+                raise ValueError("Card or ticket already bound elsewhere")
+            return {"status": "bound", "ticket": ticket["key"], "url": ticket["url"]}
+        if not existing or existing[:2] != (tracker.provider, tracker.destination):
+            raise ValueError("No card binding for current tracker")
+        return tracker.stage(existing[2], args.phase, existing[3])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("project", type=Path)
+    actions = parser.add_subparsers(dest="action", required=True)
+    listing = actions.add_parser("list", help="List recently updated open tickets in the registered scope")
+    listing.add_argument("--limit", type=int, default=20)
+    watcher = actions.add_parser("watch", help="Continuously sync all bound projects under WORKSPACE_ROOT")
+    watcher.add_argument("--kanban-home", type=Path,
+                         default=Path(os.environ.get("HERMES_KANBAN_HOME") or Path.home() / ".hermes"))
+    watcher.add_argument("--interval", type=int, default=30)
+    watcher.add_argument("--once", action="store_true")
+    for action in ("read", "bind", "stage"):
+        sub = actions.add_parser(action)
+        if action in ("read", "bind"):
+            sub.add_argument("ticket")
+        if action in ("bind", "stage"):
+            sub.add_argument("--board", required=True)
+            sub.add_argument("--card", required=True)
+        if action == "stage":
+            sub.add_argument("phase", choices=DEFAULT_STATUSES)
+    args = parser.parse_args()
+    try:
+        print(json.dumps(run(args.project.resolve(), args), ensure_ascii=False))
+    except (ValueError, OSError, KeyError, TypeError, http.client.HTTPException, sqlite3.Error) as error:
+        parser.exit(1, f"Tracker operation failed: {error}\n")
+
+
+if __name__ == "__main__":
+    main()

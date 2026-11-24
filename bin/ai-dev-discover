@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""Build registration input from a conversation's project description and Git sources."""
+
+import argparse
+import configparser
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from urllib import error, parse, request
+
+
+class DiscoveryError(ValueError):
+    pass
+
+
+SEGMENT = re.compile(r"(?!\.git$)\.?[A-Za-z0-9_][A-Za-z0-9_.+-]*", re.I)
+
+
+def location(url):
+    match = re.fullmatch(r"git@([a-zA-Z0-9.-]+):(.+)", url)
+    if match:
+        host, path = match.groups()
+    else:
+        parts = parse.urlsplit(url)
+        if (parts.scheme not in ("https", "ssh") or not parts.hostname or parts.query or
+            parts.fragment or parts.password or parts.username not in (None, "git")):
+            raise DiscoveryError("Use a credential-free HTTPS or Git SSH source URL.")
+        if parts.scheme == "https" and parts.username:
+            raise DiscoveryError("Credentials must be provided by the project's configured connection.")
+        host = parts.hostname + (f":{parts.port}" if parts.port else "")
+        path = parts.path.strip("/")
+    segments = path.removesuffix(".git").split("/")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.-]*(?::[0-9]+)?", host) or not all(
+        SEGMENT.fullmatch(part) for part in segments
+    ):
+        raise DiscoveryError("Invalid Git source host or namespace.")
+    path = "/".join(segments)
+    return host.lower() + "/" + (path.lower() if host.lower() == "github.com" else path)
+
+
+def clone_url(key, source):
+    host, path = key.split("/", 1)
+    if source.startswith("ssh://"):
+        return f"ssh://git@{host}/{path}.git"
+    if source.startswith("git@"):
+        return f"git@{host}:{path}.git"
+    return f"https://{key}.git"
+
+
+class SameHostRedirect(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, new_url):
+        if parse.urlsplit(req.full_url).netloc != parse.urlsplit(new_url).netloc:
+            raise DiscoveryError("Repository catalog redirected to a different host.")
+        return super().redirect_request(req, fp, code, msg, headers, new_url)
+
+
+def catalog_page(endpoint):
+    host = parse.urlsplit(endpoint).netloc
+    headers = {"User-Agent": "ai-dev-onboarding", "Accept": "application/json"}
+    if host == os.environ.get("AI_DEV_CATALOG_AUTH_HOST") and os.environ.get("AI_DEV_CATALOG_TOKEN"):
+        headers["Authorization"] = "Bearer " + os.environ["AI_DEV_CATALOG_TOKEN"]
+    opener = request.build_opener(SameHostRedirect())
+    with opener.open(request.Request(endpoint, headers=headers), timeout=30) as response:
+        page = json.load(response)
+    if not isinstance(page, list):
+        raise DiscoveryError("Repository catalog returned an invalid page.")
+    return page
+
+
+def catalog(group, kind):
+    host, namespace = group.split("/", 1)
+    if kind == "github-org":
+        if host != "github.com" or "/" in namespace:
+            raise DiscoveryError("The GitHub organization source must be https://github.com/ORG.")
+        endpoint = f"https://api.github.com/orgs/{namespace}/repos?type=all&sort=full_name"
+        url_field = "clone_url"
+    else:
+        endpoint = f"https://{host}/api/v4/groups/{parse.quote(namespace, safe='')}/projects?include_subgroups=true&with_shared=false&order_by=id&sort=asc"
+        url_field = "http_url_to_repo"
+    found = {}
+    page = 1
+    while True:
+        rows = catalog_page(f"{endpoint}&per_page=100&page={page}")
+        for item in rows:
+            key = location(item[url_field])
+            if not key.casefold().startswith(group.casefold() + "/"):
+                continue
+            found[key] = item.get("description") or "Project repository"
+        if len(rows) < 100:
+            return found
+        page += 1
+
+
+def safe_path(path):
+    if not isinstance(path, str) or not all(SEGMENT.fullmatch(p) for p in path.split("/")):
+        raise DiscoveryError("Checkout paths must contain only relative directory names.")
+    return path
+
+
+def read_seed(key, source):
+    with tempfile.TemporaryDirectory(prefix="ai-dev-discover-") as temp:
+        bare = Path(temp) / "seed.git"
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+        url = clone_url(key, source)
+        clone = subprocess.run(
+                ["git", "-c", "core.hooksPath=/dev/null", "clone", "--bare", "--depth=1",
+                 "--single-branch", "--filter=blob:none", "--", url, str(bare)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=env, timeout=120,
+            )
+        if clone.returncode:
+            raise DiscoveryError(f"Could not read primary repository {key} using the configured connection.")
+
+        def git(*args):
+            result = subprocess.run(["git", f"--git-dir={bare}", *args], env=env, capture_output=True, timeout=60)
+            if result.returncode:
+                raise DiscoveryError(f"Cannot read seed contents from {key}.")
+            return result.stdout
+
+        if not git("for-each-ref", "--count=1", "--format=%(refname)"):
+            return "", ""
+        tree = git("ls-tree", "-z", "HEAD").decode(errors="replace").split("\0")
+        blobs = {}
+        for line in filter(None, tree):
+            metadata, name = line.split("\t", 1)
+            mode, typ, oid = metadata.split()
+            if mode in ("100644", "100755") and typ == "blob":
+                blobs[name.lower()] = oid
+        def file(*names):
+            for name in names:
+                if name in blobs:
+                    if int(git("cat-file", "-s", blobs[name])) > 1024 * 1024:
+                        raise DiscoveryError(f"Seed {name} exceeds 1 MiB, specify smaller source documentation.")
+                    return git("cat-file", "blob", blobs[name]).decode("utf-8", errors="replace")
+            return ""
+        return file("readme.md", "readme.rst", "readme.txt", "readme"), file(".gitmodules")
+
+
+def seed_evidence(primary, readme, modules, approved):
+    roles = {}
+    paths = {}
+    parent_name = primary.rsplit("/", 1)[-1]
+    namespace = primary.rsplit("/", 1)[0]
+
+    def record(key, role, path=None):
+        if key == primary:
+            return
+        if key.rsplit("/", 1)[0] != namespace and key not in approved:
+            return
+        roles.setdefault(key, role)
+        if path:
+            paths.setdefault(key, set()).add(safe_path(path))
+
+    modules_config = configparser.RawConfigParser()
+    modules_config.read_string(modules)
+    for section in modules_config.sections():
+        if not section.startswith("submodule "):
+            continue
+        url = modules_config.get(section, "url")
+        if url.startswith(("../", "./")):
+            url = parse.urljoin(f"https://{primary}.git/", url)
+        key = location(url)
+        # An explicit gitlink declares a dependency even across owner boundaries.
+        approved.add(key)
+        record(key, "Git submodule", modules_config.get(section, "path"))
+    sibling = False
+    for line in readme.splitlines():
+        if line.strip().startswith("```"):
+            sibling = False
+        command = line.strip().removeprefix("$ ")
+        if command.startswith("cd "):
+            sibling = command[3:].strip().rstrip("/") == parent_name
+        if command.startswith("git clone "):
+            try:
+                fields = shlex.split(command, comments=True)
+            except ValueError:
+                fields = []
+            for n, token in enumerate(fields[2:], start=2):
+                if token.startswith(("https://", "ssh://git@", "git@")):
+                    try:
+                        key = location(token)
+                    except DiscoveryError:
+                        break
+                    local = fields[n+1] if n+1 < len(fields) else key.rsplit("/", 1)[-1]
+                    if not local.startswith(("-", "$")):
+                        if key == primary:
+                            sibling = False
+                        else:
+                            # Inside the primary's checkout, paths are relative to its root.
+                            # Standalone component instructions conventionally run from its README's root.
+                            record(key, "README clone", local.removeprefix("./") if sibling or n+1 < len(fields) else None)
+                    break
+        for label,url in re.findall(r"\[([^\]]+)\]\((https://[^)\s]+)\)",line):
+            try:
+                key = location(url)
+            except DiscoveryError:
+                continue
+            if key.rsplit("/",1)[0] == namespace or key in approved:
+                record(key, label)
+    return roles, paths
+
+
+def discover(args):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", args.project):
+        raise DiscoveryError("Invalid project identifier.")
+    roles = {}
+    seeds = []
+    transports = {}
+    for raw in args.source:
+        key = location(raw)
+        host, path = key.split("/", 1)
+        kind = "repo" if raw.endswith(".git") or raw.startswith(("git@", "ssh://")) else args.kind
+        if not kind:
+            if "/" in path:
+                kind = "repo"
+            else:
+                kind = "github-org" if host == "github.com" else "gitlab-group"
+        if kind == "repo":
+            if "/" not in path:
+                raise DiscoveryError("Repo source requires a namespace and repository name.")
+            roles[key] = "Explicit project repository"
+            seeds.append(key)
+            transports[key] = raw
+        else:
+            roles.update(catalog(key, kind))
+
+    primary = location(args.primary) if args.primary else None
+    if primary is None:
+        matches = [key for key in roles if key.rsplit("/", 1)[-1].casefold() == args.project.casefold()]
+        if len(matches) == 1:
+            primary = matches[0]
+        elif seeds:
+            primary = seeds[0]
+    choices = {}
+    if primary:
+        if primary.count("/") < 2:
+            raise DiscoveryError("Primary source requires a repository URL.")
+        roles[primary] = "Primary project repository"
+        if args.primary:
+            transports[primary] = args.primary
+        seed_transport = transports.get(primary, "https://")
+        readme, modules = read_seed(primary, seed_transport)
+        components, choices = seed_evidence(primary, readme, modules, set(roles))
+        for key, role in components.items():
+            if key not in roles:
+                transports[key] = seed_transport
+            roles.setdefault(key, role)
+
+    overrides = {}
+    for mapping in args.checkout:
+        url, sep, path = mapping.partition("=")
+        if not sep or location(url) not in roles:
+            raise DiscoveryError("Each --checkout must reference a discovered URL followed by =path.")
+        overrides[location(url)] = safe_path(path)
+    root = overrides.get(primary, primary.rsplit("/", 1)[-1] if primary else "")
+    destinations = {}
+    repositories = []
+    for key, role in sorted(roles.items()):
+        paths = choices.get(key, set())
+        if key in overrides:
+            path = overrides[key]
+        elif len(paths) > 1:
+            raise DiscoveryError(f"Conflicting checkout paths for {key}: {', '.join(sorted(paths))}. Resolve with --checkout.")
+        elif paths:
+            path = root + "/" + next(iter(paths))
+        else:
+            path = key.rsplit("/", 1)[-1]
+        safe_path(path)
+        if path in destinations:
+            raise DiscoveryError(f"Checkout path {path} is shared by {destinations[path]} and {key}. Resolve with --checkout.")
+        destinations[path] = key
+        repositories.append({"url": clone_url(key, transports.get(key, "https://")), "path": path, "role": role})
+    tasks = {"provider": args.tasks_provider}
+    mapping = getattr(args, "tasks_status_mapping_json", None)
+    if mapping:
+        mapping = json.loads(mapping)
+        phases = {"backlog", "ready", "running", "review", "blocked", "done"}
+        if not isinstance(mapping, dict) or any(k not in phases or not isinstance(v, str) or not v.strip()
+                                                for k, v in mapping.items()):
+            raise DiscoveryError("Task mapping must map known workflow phases to nonempty status names.")
+        tasks["status_mapping"] = mapping
+    if args.tasks_scope_json:
+        scope = json.loads(args.tasks_scope_json)
+        if not isinstance(scope, dict):
+            raise DiscoveryError("Task scope must be a JSON object.")
+        tasks["scope"] = scope
+    return {"project": args.project, "name": args.name or args.project,
+            "description": args.description, "tasks": tasks, "repositories": repositories}
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--project", required=True)
+    p.add_argument("--name")
+    p.add_argument("--description", default="")
+    p.add_argument("--source", action="append", default=[], help="repository, GitHub organization or GitLab group URL")
+    p.add_argument("--primary", help="canonical repository to inspect for component and layout evidence")
+    p.add_argument("--kind", choices=["github-org", "gitlab-group", "repo"], help="type of ambiguous HTTPS source")
+    p.add_argument("--checkout", action="append", default=[], metavar="URL=PATH", help="resolve a checkout path")
+    p.add_argument("--tasks-provider", default="internal")
+    p.add_argument("--tasks-scope-json")
+    p.add_argument("--tasks-status-mapping-json")
+    p.add_argument("--output", type=Path, required=True)
+    args = p.parse_args()
+    try:
+        manifest = discover(args)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=args.output.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                json.dump(manifest, stream, indent=2, ensure_ascii=False)
+                stream.write("\n")
+                stream.flush()
+                temporary.replace(args.output)
+            finally:
+                temporary.unlink(missing_ok=True)
+    except (ValueError, OSError, error.URLError, KeyError, configparser.Error, subprocess.TimeoutExpired) as exc:
+        print(f"Discovery failed: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"project": args.project, "repositories": len(manifest["repositories"]), "output": str(args.output)}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

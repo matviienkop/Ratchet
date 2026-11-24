@@ -1,0 +1,241 @@
+#!/usr/bin/python3 -I
+"""Run patch checks in disposable worktrees on an operator-configured SSH guest."""
+
+import hashlib
+import inspect
+import json
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+
+
+def guest():
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+    import shutil
+    import signal
+    import subprocess
+    import sys
+    import tempfile
+
+    verb, scope, base, patch_sha, args = sys.argv[1:]
+    argv = json.loads(args)
+    if os.getuid() == 0:
+        sys.exit("Guest checks require an unprivileged SSH user.")
+    os.umask(0o077)
+    os.environ["PATH"] = "/opt/ai-dev/go/bin:/usr/local/bin:/usr/bin:/bin"
+    for name in list(os.environ):
+        if name.startswith("GIT_"):
+            del os.environ[name]
+    os.environ.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+                      GIT_TERMINAL_PROMPT="0")
+    cache = Path.home() / ".cache/ai-dev/stands" / scope
+    cache.mkdir(parents=True, exist_ok=True)
+
+    def checkout(path, pack):
+        fmt = "sha256" if len(base) == 64 else "sha1"
+        subprocess.run(["git", "init", "-q", "--template=", "--object-format=" + fmt, path], check=True)
+        (path / ".git/shallow").write_text(base + "\n")
+        with pack.open("rb") as stream:
+            subprocess.run(["git", "index-pack", "--stdin"], cwd=path, stdin=stream,
+                           stdout=subprocess.DEVNULL, check=True)
+        subprocess.run(["git", "checkout", "-q", "--detach", base], cwd=path, check=True)
+
+    def patched(path, payload):
+        patch = payload.read_bytes()
+        if hashlib.sha256(patch).hexdigest() != patch_sha:
+            sys.exit("Stand patch digest mismatch.")
+        if patch:
+            subprocess.run(["git", "apply", "--index", "--binary", "--whitespace=nowarn", "-"],
+                           cwd=path, input=patch, check=True)
+
+    def command(path):
+        tree = subprocess.check_output(["git", "write-tree"], cwd=path)
+        process = subprocess.Popen(argv, cwd=path, stdin=subprocess.DEVNULL, start_new_session=True,
+                                   umask=0o022)
+        try:
+            code = process.wait(timeout=300)
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            else:
+                process.wait()
+                sys.exit("Guest command timed out or left child processes running.")
+        if subprocess.check_output(["git", "write-tree"], cwd=path) != tree:
+            sys.exit("Guest command changed the candidate index.")
+        # Rebuild the index to detect unstaged and newly created source changes.
+        subprocess.run(["git", "add", "-A"], cwd=path, check=True)
+        if subprocess.check_output(["git", "write-tree"], cwd=path) != tree:
+            sys.exit("Guest command changed the candidate worktree.")
+        return code if code >= 0 else 128 - code
+
+    try:
+        with tempfile.TemporaryDirectory(dir=cache) as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            if verb == "check":
+                checkout(candidate, cache / "base.pack")
+                patched(candidate, cache / "changes.patch")
+                sys.exit(command(candidate))
+
+            pack, patch = root / "base.pack", root / "changes.patch"
+            size = int(sys.stdin.buffer.readline())
+            patch.write_bytes(sys.stdin.buffer.read(size))
+            with pack.open("wb") as output:
+                shutil.copyfileobj(sys.stdin.buffer, output)
+            if argv:
+                probe = root / "base"
+                checkout(probe, pack)
+                print("Running stand probe on clean base " + base, flush=True)
+                code = command(probe)
+                if code:
+                    sys.exit(code)
+            checkout(candidate, pack)
+            patched(candidate, patch)
+            os.replace(pack, cache / pack.name)
+            os.replace(patch, cache / patch.name)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        sys.exit("Guest stand failed: " + str(exc))
+
+
+def settings():
+    path = Path(__file__).resolve().with_suffix(".json")
+    if path.stat().st_uid or path.stat().st_mode & 0o022:
+        raise ValueError("Stand configuration must be owned by root and writable only by root.")
+    cfg = json.loads(path.read_text())
+    for name in ("ssh_config", "power", "bootstrap"):
+        if name == "bootstrap" and name not in cfg:
+            continue
+        if not isinstance(cfg[name], str) or not Path(cfg[name]).is_absolute():
+            raise ValueError(f"{name} must be an absolute path.")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", cfg["ssh_host"]):
+        raise ValueError("Invalid ssh_host alias.")
+    probe = cfg.get("base_probe", [])
+    if not isinstance(probe, list) or not all(isinstance(arg, str) for arg in probe):
+        raise ValueError("base_probe must be a command argument array.")
+    return cfg
+
+
+def ssh(cfg, argv, **options):
+    client = ["/usr/bin/ssh", "-F", cfg["ssh_config"], "-oBatchMode=yes", "-oConnectTimeout=5",
+              "-oForwardAgent=no", "-oClearAllForwardings=yes", cfg["ssh_host"]]
+    return subprocess.run([*client, shlex.join(argv)], **options)
+
+
+def start(cfg, *, bootstrap=True):
+    subprocess.run([cfg["power"], "start"], check=True)
+    deadline = time.monotonic() + 240
+    reason = "timed out"
+    while time.monotonic() < deadline:
+        try:
+            ready = ssh(cfg, ["true"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE, timeout=min(10, deadline - time.monotonic()))
+            if ready.returncode == 0:
+                break
+            reason = ready.stderr.decode(errors="replace").strip()
+        except subprocess.TimeoutExpired:
+            reason = "connection timed out"
+        time.sleep(2)
+    else:
+        raise ValueError("Guest SSH unavailable after 240 seconds: " + reason)
+    ssh(cfg, ["sh", "-ec", "if command -v cloud-init >/dev/null; then cloud-init status --wait; fi"],
+        stdin=subprocess.DEVNULL, check=True, timeout=600)
+    if bootstrap and "bootstrap" in cfg:
+        subprocess.run([cfg["bootstrap"]], stdin=subprocess.DEVNULL, check=True)
+
+
+def main(args):
+    if not args:
+        raise ValueError("Expected status, start, shutdown, prepare or check.")
+    verb, *rest = args
+    cfg = settings()
+    available = {"status", "start", "shutdown", "prepare", "check", "test"}
+    if cfg.get("maintenance"):
+        available.update(("reset", "reinstall", "restore-previous"))
+    if cfg.get("fixture_repair") is True:
+        available.add("repair")
+    allowed = cfg.get("operations", sorted(available - {"reset", "reinstall", "restore-previous"}))
+    if not isinstance(allowed, list) or not all(isinstance(v, str) and v in available for v in allowed):
+        raise ValueError("Invalid SSH guest operation list.")
+    if verb == "operations" and not rest:
+        print(json.dumps(sorted(set(allowed))))
+        return 0
+    if verb not in allowed:
+        raise ValueError("Operation is outside this guest's grant.")
+    guard = ("import os,sys; "
+             "sys.exit('A non-root guest identity is required') if os.getuid()==0 else None; "
+             "os.execvp(sys.argv[1],sys.argv[1:])")
+    if verb in ("reset", "reinstall", "restore-previous"):
+        transport = Path(cfg["maintenance"])
+        if rest or not transport.is_absolute() or transport != transport.resolve():
+            raise ValueError("Maintenance takes one verb through a fixed transport")
+        for path in (*transport.parents, transport):
+            info = path.lstat()
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError("Untrusted maintenance transport")
+        if not transport.is_file():
+            raise ValueError("Maintenance transport is not a regular file")
+        return subprocess.run([str(transport), verb], stdin=subprocess.DEVNULL,
+                              cwd="/", env={"PATH": "/usr/bin:/bin", "LANG": "C"}).returncode
+    if verb == "test" and len(rest) >= 2 and rest[0] == "--":
+        return ssh(cfg, ["python3", "-I", "-c", guard, *rest[1:]], stdin=subprocess.DEVNULL).returncode
+    if verb in ("status", "shutdown") and not rest:
+        return subprocess.run([cfg["power"], verb]).returncode
+    if verb == "repair" and not rest and cfg.get("fixture_repair") is True:
+        start(cfg, bootstrap=False)
+        return ssh(cfg, ["python3", "-I", "-c", guard, "/bin/sh", "-s"]).returncode
+    if verb == "start" and not rest:
+        start(cfg)
+        return 0
+    if not ((verb == "prepare" and len(rest) == 3) or
+            (verb == "check" and len(rest) >= 5 and rest[3] == "--")):
+        raise ValueError("Expected prepare WORKTREE BASE PATCH_FILE or check WORKTREE BASE PATCH_SHA -- COMMAND...")
+    worktree = Path(rest[0]).resolve(strict=True)
+    base = rest[1]
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", base):
+        raise ValueError("Expected a full Git commit object ID.")
+    git = ["git", "--no-replace-objects", "-C", str(worktree)]
+    if subprocess.check_output([*git, "cat-file", "-t", base]).strip() != b"commit":
+        raise ValueError("The approved base must identify a Git commit in the worktree's repository.")
+
+    if verb == "prepare":
+        patch = Path(rest[2]).read_bytes()
+        digest = hashlib.sha256(patch).hexdigest()
+        command = cfg.get("base_probe", [])
+    else:
+        digest = rest[2]
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("Expected a SHA-256 patch digest.")
+        command = rest[4:]
+    key = json.dumps([str(Path(__file__).resolve()), str(worktree), base, digest]).encode()
+    scope = hashlib.sha256(key).hexdigest()
+    remote = ["python3", "-I", "-c", inspect.getsource(guest) + "\nguest()",
+              verb, scope, base, digest, json.dumps(command)]
+    if verb == "check":
+        return ssh(cfg, remote, stdin=subprocess.DEVNULL).returncode
+
+    start(cfg)
+    # Include only the exact base commit and its tree. A shallow checkout needs no ancestor objects.
+    objects = subprocess.check_output([*git, "rev-list", "--objects", "--no-object-names", base + "^{tree}"])
+    with tempfile.TemporaryFile() as bundle:
+        bundle.write(str(len(patch)).encode() + b"\n" + patch)
+        bundle.flush()
+        subprocess.run([*git, "pack-objects", "--stdout"], input=base.encode() + b"\n" + objects,
+                       stdout=bundle, check=True)
+        bundle.seek(0)
+        return ssh(cfg, remote, stdin=bundle).returncode
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        sys.exit("Stand failed: " + str(error))

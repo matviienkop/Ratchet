@@ -1,0 +1,19 @@
+[Unit]
+Description=Mirror Hermes Kanban card stages to project trackers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+Environment=HOME=/home/hermes
+ExecStart=/home/hermes/.local/bin/ai-dev-tracker /home/hermes/.hermes/ai-dev/workspace watch --kanban-home /home/hermes/.hermes
+Restart=on-failure
+RestartSec=30
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

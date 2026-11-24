@@ -1,0 +1,14 @@
+[Unit]
+Description=Wake scheduled ai-dev reviewer-capacity waits
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+Environment=HOME=/home/hermes
+Environment=PATH=/home/hermes/.local/bin:/home/hermes/.hermes/hermes-agent/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/hermes/.local/bin/ai-dev-card recovery-wake
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes

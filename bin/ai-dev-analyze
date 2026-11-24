@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+"""Collect revision-bound project evidence and publish local onboarding artifacts."""
+import argparse
+from collections import defaultdict
+from contextlib import contextmanager
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import subprocess
+import sys
+import tempfile
+from urllib.parse import quote
+
+
+KINDS = ("component", "architecture", "requirement", "rule", "style", "check", "delivery", "task", "question")
+SECTIONS = {
+    "component": ("docs/components.md", "Component map"),
+    "architecture": ("docs/architecture.md", "Architecture and dependencies"),
+    "requirement": ("docs/requirements.md", "Project requirements"),
+    "rule": ("rules/index.md", "Applicable rules"),
+    "style": ("rules/style.md", "Coding conventions"),
+    "check": ("docs/verification.md", "Verification procedures"),
+    "delivery": ("docs/delivery.md", "Delivery and acceptance"),
+    "question": ("docs/open-questions.md", "Open questions"),
+}
+OMIT = re.compile(r"(^|/)(\.git|vendor|node_modules|dist|build|fixtures/secrets|private|secrets?|credentials?)(/|$)|(^|/)(\.env(?:\..*)?|id_(?:rsa|ed25519).*|auth\.json)$|\.(pem|key|p12|kdbx|tfstate|pfx|age|gpg)$", re.I)
+SECRET = re.compile(r"-----BEGIN [^-\n]*(?:PRIVATE KEY|PGP PRIVATE)|\b(?:gh[pousr]_|github_pat_|glpat-|ya29\.|sk-proj-|xox[bpars]-)\S{10,}|https?://[^/\s:@]+:[^/\s@]+@|(?:password|refresh_token|api[_-]?key|client_secret|access_token)\s*[\"']?\s*[:=]\s*[\"']?[^$\s'\"<>{}]{8,}", re.I)
+TEXT = {".md", ".rst", ".txt", ".yaml", ".yml", ".toml", ".json", ".mod", ".go", ".ts", ".tsx", ".py", ".sh", ".rs", ".js", ".mk", ".vue"}
+CODE_EXTENSIONS = set((".go .ts .tsx .py .sh .rs .js .vue .java .kt .kts .scala .cs .fs .vb .c .cc .cpp .h .hpp "
+                       ".swift .m .mm .dart .rb .php .ex .exs .lua .sql .jsx .mjs .cjs .mts .cts .svelte .css "
+                       ".scss .html .gradle .tf .zig .hs").split())
+STYLE_CONFIG = re.compile(
+    r"^(?:\.editorconfig|\.clang-format(?:-ignore)?|\.prettierrc|\.prettierignore|\.eslintrc|\.eslintignore|"
+    r"\.stylelintrc|\.stylelintignore|\.rubocop|\.scalafmt|checkstyle|spotless|eslint\.config|"
+    r"prettier\.config|rustfmt|biome|ruff)(?:\.|$)", re.I)
+TEXT.update(CODE_EXTENSIONS | {".xml", ".properties", ".csproj", ".props", ".ini", ".cfg"})
+ORDER = re.compile(r"(readme|agents|claude|design|requirement|standard|guideline|roadmap|backlog|task|decision|architecture|runbook|contribut|workflow|makefile|package\.json|go\.mod|pyproject|release-lock|dockerfile|\.github/workflows/)", re.I)
+STATES = {"open", "done", "deferred", "superseded", "uncertain"}
+
+
+def dump(data):
+    return json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+
+
+def digest(data):
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
+def safe_path(root, name):
+    parts = PurePosixPath(name).parts
+    if not parts or name.startswith("/") or any(x in ("", ".", "..") for x in name.split("/")):
+        raise ValueError(f"invalid relative path: {name!r}")
+    path = root
+    for part in parts:
+        path = path / part
+        if path.is_symlink():
+            raise ValueError(f"symlink in workspace path: {name!r}")
+    return path
+
+
+def put(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", delete=False, encoding="utf8") as stream:
+        tmp = Path(stream.name)
+        try:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    os.replace(tmp, path)
+
+
+def git(repo, *args):
+    run = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=False, timeout=60)
+    if run.returncode:
+        raise ValueError(f"Git inspection failed for {repo.name}: {args[0]}")
+    return run.stdout
+
+
+def text_value(value, name, limit=1200):
+    if not isinstance(value, str) or not value.strip() or len(value) > limit or SECRET.search(value):
+        raise ValueError(f"invalid {name} or sensitive value in worker result")
+    if any(ord(c) < 32 for c in value):
+        raise ValueError(f"control character in {name}")
+    return value.strip()
+
+
+def candidates(repo, revision):
+    files = {}
+    for entry in git(repo, "ls-tree", "-rlz", revision).split(b"\0"):
+        if not entry:
+            continue
+        header, raw = entry.split(b"\t", 1)
+        mode, kind, blob, size = header.split()
+        path = os.fsdecode(raw)
+        if mode not in (b"100644", b"100755") or kind != b"blob" or int(size) > 1024 * 1024:
+            continue
+        if not path.isprintable() or OMIT.search(path) or SECRET.search(path):
+            continue
+        name = Path(path)
+        if name.suffix.lower() in TEXT or STYLE_CONFIG.match(name.name) or ORDER.search(name.name):
+            files[path] = blob.decode()
+    return files
+
+
+def source_lines(repo, blob):
+    data = git(repo, "cat-file", "blob", blob)
+    if b"\0" in data:
+        raise ValueError("source is binary")
+    return data.decode("utf8", errors="replace").splitlines()
+
+
+class Onboarding:
+    def __init__(self, project):
+        self.root = project.resolve(strict=True)
+        self.manifest = json.loads(safe_path(self.root, "project.yaml").read_text())
+        self.repos = {r["path"]: r for r in self.manifest["repositories"]}
+        self.state = safe_path(self.root, ".onboarding")
+        self.state.mkdir(mode=0o700, exist_ok=True)
+
+    def statefile(self, name):
+        return safe_path(self.state, name)
+
+    def checkout(self, path):
+        if path not in self.repos:
+            raise ValueError("checkout is outside the project manifest")
+        repo = safe_path(self.root, f"repos/{path}")
+        if not repo.is_dir():
+            raise ValueError(f"missing checkout: {path}")
+        toplevel = os.fsdecode(git(repo, "rev-parse", "--show-toplevel")).rstrip("\n")
+        if Path(toplevel).resolve() != repo:
+            raise ValueError(f"missing checkout: {path}")
+        # Reading the stored URL ignores transport-only insteadOf rewrites.
+        origin = git(repo, "config", "--local", "--get-all", "remote.origin.url").decode().strip()
+        if origin != self.repos[path]["url"]:
+            raise ValueError(f"origin mismatch: {path}")
+        try:
+            rev = git(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+        except ValueError:
+            head = git(repo, "symbolic-ref", "--quiet", "HEAD").decode().strip()
+            if not head.startswith("refs/heads/") or git(repo, "for-each-ref", "--count=1", "--format=%(refname)").strip():
+                raise
+            git(repo, "fsck", "--connectivity-only", "--no-dangling")
+            rev = None
+        return repo, rev
+
+    def recordfile(self, path):
+        return self.statefile(f"reports/{digest(path)}.json")
+
+    def record_for(self, path, revision):
+        p = self.recordfile(path)
+        if p.is_file():
+            data = json.loads(p.read_text())
+            origin = self.repos[path]["url"]
+            # Legacy reports predate origin capture. checkout() verified the active origin and commit.
+            if (data.get("style_profile_version") == 1 and data.get("revision") == revision and data.get("checkout") == path
+                    and data.get("origin", origin) == origin):
+                return data
+        return None
+
+    def inventory(self):
+        result = []
+        for path in self.repos:
+            try:
+                _, rev = self.checkout(path)
+                if rev is None:
+                    result.append({"checkout": path, "revision": None, "status": "empty"})
+                    continue
+                result.append({"checkout": path, "revision": rev,
+                               "status": "analyzed" if self.record_for(path, rev) else "pending-analysis"})
+            except (ValueError, OSError) as exc:
+                result.append({"checkout": path, "status": "unavailable", "reason": str(exc)})
+        return result
+
+    def brief(self, path, offset, limit, pattern):
+        repo, rev = self.checkout(path)
+        files = sorted(candidates(repo, rev) if rev else (), key=lambda f: (
+            not bool(STYLE_CONFIG.match(Path(f).name) or ORDER.search(f)), f.count("/"), f))
+        if pattern:
+            files = [f for f in files if pattern.casefold() in f.casefold()]
+        return {"checkout": path, "origin": self.repos[path]["url"], "revision": rev, "eligible_sources": len(files),
+                "offset": offset, "files": files[offset:offset+limit],
+                "next_offset": offset+limit if offset+limit < len(files) else None}
+
+    def read(self, path, source, start, limit):
+        repo, rev = self.checkout(path)
+        if not rev:
+            raise ValueError("empty checkout has no committed sources")
+        files = candidates(repo, rev)
+        if source not in files:
+            raise ValueError("source is outside the bounded text inventory")
+        lines = source_lines(repo, files[source])
+        if any("-----BEGIN " in line and "PRIVATE KEY" in line for line in lines):
+            raise ValueError("source contains private key material and cannot be displayed")
+        shown = [{"line": i+1, "text": "[sensitive line omitted]" if SECRET.search(lines[i]) else lines[i][:600]}
+                 for i in range(start-1, min(len(lines), start-1+limit))]
+        return {"checkout": path, "revision": rev, "path": source, "line_count": len(lines), "excerpt": shown}
+
+    def style(self, path, source, language):
+        repo, rev = self.checkout(path)
+        target = safe_path(repo, source).relative_to(repo)
+        result = {"checkout": path, "revision": rev, "file": source, "style": []}
+        if rev is None:
+            return {**result, "status": "empty"}
+        name = "config/discovered.json"
+        summary = self.statefile("summary.json")
+        if summary.is_file():
+            latest = json.loads(summary.read_text())
+            if latest.get("configuration", latest.get("active_configuration")) == "provisional/" + name:
+                name = "provisional/" + name
+        config = safe_path(self.root, name)
+        if config.is_file():
+            profile = json.loads(config.read_text())["repositories"].get(path, {})
+            if profile.get("origin") == self.repos[path]["url"] and profile.get("revision") == rev and "style" in profile:
+                result["style"] = [r for r in profile["style"]
+                                   if PurePosixPath(r["scope"]) in target.parents
+                                   and r["language"] in ("*", language.casefold())]
+                return {**result, "status": "available", "configuration": name,
+                        "limitation": profile.get("style_limitation")}
+        raise ValueError("no published style profile for this checkout revision; refresh onboarding")
+
+    def record(self, path, raw):
+        repo, rev = self.checkout(path)
+        if not rev:
+            raise ValueError("empty checkout has no evidence revision")
+        origin = self.repos[path]["url"]
+        if raw.get("revision") != rev or raw.get("origin", origin) != origin:
+            raise ValueError("worker revision or origin is stale")
+        findings = raw.get("findings")
+        if not isinstance(findings, list) or len(findings) > 3000:
+            raise ValueError("invalid findings array")
+        files = candidates(repo, rev)
+        checked = []
+        lengths = {}
+
+        def reference(item):
+            file = item["file"]
+            if file not in files:
+                raise ValueError(f"ineligible source reference: {file!r}")
+            if file not in lengths:
+                lengths[file] = len(source_lines(repo, files[file]))
+            line = item["line"]
+            if type(line) is not int or not 1 <= line <= lengths[file]:
+                raise ValueError(f"invalid evidence line in {file!r}")
+            return {"file": file, "line": line}
+
+        for item in findings:
+            kind = item["kind"]
+            if kind not in KINDS:
+                raise ValueError("unknown finding kind")
+            row = {"kind": kind, **reference(item), "text": text_value(item["text"], "finding")}
+            if kind == "style":
+                scope = text_value(item["scope"], "style scope")
+                if scope != ".":
+                    safe_path(repo, scope)
+                if item["basis"] not in ("configured", "observed"):
+                    raise ValueError("unknown style evidence basis")
+                row.update(scope=scope, language=text_value(item["language"], "style language", 80).casefold(),
+                           basis=item["basis"])
+                if row["basis"] == "observed":
+                    other = reference(item["corroboration"])
+                    if other["file"] == row["file"]:
+                        raise ValueError("observed style requires a second source file")
+                    if any(PurePosixPath(scope) not in PurePosixPath(r["file"]).parents for r in (row, other)):
+                        raise ValueError("observed examples must be within the stated scope")
+                    row["corroboration"] = other
+            if kind == "task":
+                row["id"] = text_value(item["id"], "task identity", 160)
+                if item["status"] not in STATES:
+                    raise ValueError("unknown task status")
+                row["status"] = item["status"]
+            checked.append(row)
+        if files and not any(r["kind"] == "component" for r in checked):
+            raise ValueError("a component description with an evidence reference is required")
+        exclusions = raw.get("limitations", [])
+        if not isinstance(exclusions, list) or len(exclusions) > 40:
+            raise ValueError("invalid limitations array")
+        style_limitation = raw.get("style_limitation")
+        if style_limitation is not None or not any(r["kind"] == "style" for r in checked) and any(
+            Path(f).suffix.lower() in CODE_EXTENSIONS or STYLE_CONFIG.match(Path(f).name) for f in files
+        ):
+            style_limitation = text_value(style_limitation, "style limitation", 800)
+            exclusions = [*exclusions, "Coding style: " + style_limitation]
+        result = {"checkout": path, "origin": origin, "revision": rev, "style_profile_version": 1, "findings": checked,
+                  "style_limitation": style_limitation,
+                  "limitations": [text_value(x, "limitation") for x in exclusions]}
+        put(self.recordfile(path), dump(result))
+        return {"checkout": path, "revision": rev, "findings": len(checked)}
+
+    def outputs(self, reports, base, outstanding, empty):
+        outputs = {}
+        index = defaultdict(list)
+        settings = {path: {"origin": self.repos[path]["url"], "revision": None, "rules": [], "checks": [],
+                           "delivery": [], "style": []} for path in empty}
+        tasks = defaultdict(list)
+        task_notes = []
+        limitations = []
+        for report in reports:
+            checkout = report["checkout"]
+            revision = report["revision"]
+            settings[checkout] = {"origin": report["origin"], "revision": revision, "rules": [], "checks": [],
+                                  "delivery": [], "style": [], "style_limitation": report.get("style_limitation")}
+            slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", checkout).strip("-")[:70] + "-" + digest(checkout)[:8]
+            grouped = defaultdict(list)
+            for row in report["findings"]:
+                evidence = {"checkout": checkout, "revision": revision, "file": row["file"], "line": row["line"]}
+                if row["kind"] == "task":
+                    tasks[row["id"]].append((row, evidence))
+                    continue
+                grouped[row["kind"]].append((row, evidence))
+                if row["kind"] == "style":
+                    settings[checkout]["style"].append({k: v for k, v in row.items() if k != "kind"})
+                target = {"rule": "rules", "check": "checks", "delivery": "delivery"}.get(row["kind"])
+                if target:
+                    settings[checkout][target].append({"text": row["text"], "source": row["file"], "line": row["line"]})
+            for kind, rows in grouped.items():
+                idxfile, title = SECTIONS[kind]
+                dest = str(Path(idxfile).with_suffix("") / (slug + ".md"))
+                index[kind].append((checkout, dest))
+                entries = []
+                for r, e in rows:
+                    label = f"[{r['scope']} · {r['language']} · {r['basis']}] " if kind == "style" else ""
+                    refs = self.link(base / dest, e)
+                    if "corroboration" in r:
+                        refs += " " + self.link(base / dest, {**e, **r["corroboration"]})
+                    entries.append(f"- {label}{r['text']} {refs}")
+                outputs[dest] = f"# {title} for {checkout}\n\n" + "\n".join(entries) + "\n"
+            limitations.extend(f"- {checkout}: {note}" for note in report["limitations"])
+
+        def index_entry(src, label, dest):
+            return f"- [{label}]({quote(os.path.relpath(dest, Path(src).parent))})"
+
+        overview = [f"# {self.manifest.get('name', self.manifest['project'])}", "",
+                    self.manifest.get("description", ""), "", "## Project evidence", ""]
+        if empty:
+            overview.append("Checkouts awaiting a first commit: " + ", ".join(empty))
+        if outstanding:
+            overview[3:3] = [
+                "", "## Provisional coverage", "",
+                f"{len(reports)} of {len(self.repos)} declared repositories analyzed.",
+                *[f"- {row['checkout']} ({row['status']})" for row in outstanding], ""
+            ]
+        for kind, links in index.items():
+            file, title = SECTIONS[kind]
+            outputs[file] = f"# {title}\n\n" + "\n".join(index_entry(file, k, v) for k, v in links) + "\n"
+            overview.append(index_entry("docs/overview.md", title, file))
+        provider = self.manifest.get("tasks", {}).get("provider", "internal")
+        existing_cards = defaultdict(list)
+        if provider == "internal":
+            task_root = safe_path(self.root, "tasks")
+            for card in task_root.glob("*.md"):
+                if card.is_symlink() or not card.is_file():
+                    continue
+                # Manual cards can declare an ID in frontmatter, the first heading or their filename.
+                with card.open(encoding="utf8") as stream:
+                    header = stream.read(2048)
+                front = re.match(r"^---\r?\n(.*?)\r?\n---", header, re.S)
+                native = re.search(r"^id:[ \t]*(.+?)[ \t]*$", front[1], re.M) if front else None
+                heading = re.search(r"^# ([^\n]+)", header, re.M)
+                ids = {card.stem}
+                if native:
+                    ids.add(native[1].strip(" \"'"))
+                if heading:
+                    ids.add(heading[1].strip())
+                for task_id in ids:
+                    existing_cards[task_id].append(str(card.relative_to(self.root)))
+        for identity, entries in sorted(tasks.items()):
+            row, evidence = entries[0]
+            dest = "tasks/" + re.sub(r"[^a-zA-Z0-9_-]", "-", identity)[:48] + "-" + digest(identity)[:8] + ".md"
+            statuses = {r["status"] for r, _ in entries}
+            titles = {r["text"].casefold().strip() for r, _ in entries}
+            status = row["status"] if len(statuses) == 1 and len(titles) == 1 else "uncertain"
+            # A later scan may close a card previously imported as open.
+            manual = sorted(set(existing_cards[identity]).difference({dest}))
+            if manual:
+                task_notes.append(f"- {identity}: matched existing card(s) " + ", ".join(manual))
+            elif provider == "internal" and status != "uncertain" and (status == "open" or safe_path(self.root, dest).exists()):
+                outputs[dest] = f"# {identity}\n\n{row['text']}\n\nStatus: {status}\n\n" + "\n".join(
+                    "- " + self.link(base / dest, e) for _, e in entries) + "\n"
+            for r, e in entries:
+                task_notes.append(f"- {identity} ({status}): {r['text']} {self.link(base / 'docs/recovered-tasks.md', e)}")
+        if task_notes:
+            outputs["docs/recovered-tasks.md"] = "# Recovered work\n\n" + "\n".join(task_notes) + "\n"
+            overview.append(index_entry("docs/overview.md", "Recovered work", "docs/recovered-tasks.md"))
+        if limitations:
+            overview += ["", "## Coverage limits", "", *limitations]
+        outputs["docs/overview.md"] = "\n".join(overview).rstrip() + "\n"
+        outputs["config/discovered.json"] = dump({"repositories": settings})
+        return outputs
+
+    @staticmethod
+    def link(output, evidence):
+        src = Path("repos") / evidence["checkout"] / evidence["file"]
+        relative = quote(os.path.relpath(src, Path(output).parent))
+        return f"([source]({relative}#L{evidence['line']}), {evidence['revision'][:12]} L{evidence['line']})"
+
+    def finalize(self, allow_partial=False):
+        inventory = self.inventory()
+        pending = [row for row in inventory if row["status"] not in ("analyzed", "empty")]
+        empty = [row["checkout"] for row in inventory if row["status"] == "empty"]
+        analyzed = [row for row in inventory if row["status"] == "analyzed"]
+        coverage = {"analyzed": len(analyzed), "empty": empty, "total": len(inventory), "outstanding": pending,
+                    "members": {path: item["url"] for path, item in self.repos.items()}}
+        if pending and not allow_partial:
+            return self.publish_summary({"status": "incomplete", "output_root": None, **coverage})
+        reports = []
+        for row in analyzed:
+            path = row["checkout"]
+            report = self.record_for(path, row["revision"])
+            if "origin" not in report:
+                report["origin"] = self.repos[path]["url"]
+                put(self.recordfile(path), dump(report))
+            reports.append(report)
+        base = Path("provisional") if pending else Path()
+        outputs = self.outputs(reports, base, pending, empty)
+        ledger = self.statefile("generated-provisional.json" if pending else "generated.json")
+        owned = json.loads(ledger.read_text()) if ledger.is_file() else {}
+        changes = []
+        conflicts = []
+        # Record intended writes first so a retry can distinguish its own files after a crash.
+        for name, content in outputs.items():
+            dest = safe_path(self.root, str(base / name))
+            if dest.exists() and not dest.is_file():
+                raise ValueError(f"output path occupied: {name}")
+            old = hashlib.sha256(dest.read_bytes()).hexdigest() if dest.exists() else None
+            new = digest(content)
+            known = owned.get(name, [])
+            if old == new:
+                owned[name] = [new]
+            elif old in known or old is None and name not in owned:
+                owned[name] = [old, new]
+                changes.append((dest, content))
+            else:
+                conflicts.append(name)
+        stale = []
+        retired = []
+        for name in sorted(set(owned).difference(outputs)):
+            dest = safe_path(self.root, str(base / name))
+            if not dest.exists():
+                del owned[name]
+                continue
+            old = hashlib.sha256(dest.read_bytes()).hexdigest() if dest.is_file() else None
+            if old is None or old not in owned[name]:
+                conflicts.append(name)
+                stale.append(name)
+                continue
+            if not pending and name.startswith("tasks/"):
+                # Losing a source repository does not close or cancel an active project task.
+                stale.append(name)
+                continue
+            # Never move an arbitrary project file on the strength of a malformed ledger entry.
+            if not name.startswith(("docs/", "rules/", "tasks/")) or not name.endswith(".md"):
+                stale.append(name)
+                continue
+            namespace = "provisional" if pending else "full"
+            archive = self.statefile(f"retired/{namespace}/{old}/{name}")
+            archive.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if archive.exists() and (not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest() != old):
+                stale.append(name)
+                continue
+            dest.replace(archive)
+            retired.append(name)
+            del owned[name]
+        put(ledger, dump(owned))
+        for dest, content in changes:
+            put(dest, content)
+            owned[str(dest.relative_to(self.root / base))] = [digest(content)]
+        put(ledger, dump(owned))
+        status = "needs-review" if conflicts or stale else "complete"
+        result = {"status": "incomplete" if pending else status, **coverage,
+                  "output_root": str(self.root / base),
+                  "task_provider": self.manifest.get("tasks", {}).get("provider", "internal"),
+                  "updated": len(changes), "retired": retired, "manual_conflicts": conflicts,
+                  "previous_outputs_to_review": stale,
+                  "overview": str(self.root / base / "docs/overview.md"),
+                  "configuration": str(base / "config/discovered.json"),
+                  "local_task_cards": sum(name.startswith("tasks/") for name in outputs),
+                  "questions": sum(1 for rep in reports for r in rep["findings"] if r["kind"] == "question")}
+        return self.publish_summary(result)
+
+    def publish_summary(self, result):
+        summary = self.statefile("summary.json")
+        if result["status"] == "incomplete" and summary.exists():
+            previous = json.loads(summary.read_text())
+            if "configuration" not in result:
+                result["active_configuration"] = previous.get("configuration", previous.get("active_configuration"))
+            if previous.get("status") in {"complete", "needs-review"}:
+                put(self.statefile("last-full-summary.json"), dump(previous))
+        put(summary, dump(result))
+        return result
+
+
+@contextmanager
+def project_snapshot(path, writable):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        # Membership mutations hold an exclusive flock on this directory.
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        project = Onboarding(path)
+        with project.statefile("lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX if writable else fcntl.LOCK_SH)
+            yield project
+    finally:
+        os.close(fd)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("project", type=Path)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("inventory")
+    finalize = commands.add_parser("finalize")
+    finalize.add_argument("--partial", action="store_true",
+                          help="write provisional outputs for analyzed checkouts when coverage is incomplete")
+    for cmd in ("brief", "read", "record", "style"):
+        sub = commands.add_parser(cmd)
+        sub.add_argument("checkout")
+        if cmd == "brief":
+            sub.add_argument("--match", default="")
+            sub.add_argument("--offset", type=int, default=0)
+            sub.add_argument("--limit", type=int, default=40)
+        elif cmd == "read":
+            sub.add_argument("source")
+            sub.add_argument("--start", type=int, default=1)
+            sub.add_argument("--limit", type=int, default=35)
+        elif cmd == "style":
+            sub.add_argument("source", help="file to edit, relative to the checkout")
+            sub.add_argument("--language", required=True, help="canonical stack name used during onboarding")
+        else:
+            sub.add_argument("--input", type=argparse.FileType("r"), default=sys.stdin)
+    a = parser.parse_args()
+    if getattr(a, "offset", 0) < 0 or getattr(a, "start", 1) < 1 or not 1 <= getattr(a, "limit", 1) <= 200:
+        parser.error("offset must be nonnegative, start positive, and limit between 1 and 200")
+    with project_snapshot(a.project, a.command in ("record", "finalize")) as project:
+        if a.command == "brief":
+            result = project.brief(a.checkout, a.offset, a.limit, a.match)
+        elif a.command == "read":
+            result = project.read(a.checkout, a.source, a.start, a.limit)
+        elif a.command == "style":
+            result = project.style(a.checkout, a.source, a.language)
+        elif a.command == "record":
+            result = project.record(a.checkout, json.load(a.input))
+        elif a.command == "finalize":
+            result = project.finalize(a.partial)
+        else:
+            result = project.inventory()
+    print(dump(result), end="")
+    if isinstance(result, dict) and result.get("status") == "incomplete":
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (KeyError, TypeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        print(f"Onboarding failed: {exc}", file=sys.stderr)
+        sys.exit(1)

@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Save or look up a project's lowest-precedence coding convention for a checkout."""
+import argparse
+from contextlib import ExitStack
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+from urllib.parse import urlsplit
+
+
+WEB_STYLE = ("Use Prettier defaults for formatting, lowerCamelCase for functions and values, "
+             "and UpperCamelCase for classes and types.", "https://google.github.io/styleguide/tsguide.html")
+DEFAULTS = {
+    "python": ("Follow PEP 8.", "https://peps.python.org/pep-0008/"),
+    "go": ("Use gofmt, MixedCaps names and short lowercase package names.", "https://go.dev/doc/effective_go"),
+    "rust": ("Use rustfmt with the Rust Style Guide.", "https://doc.rust-lang.org/style-guide/"),
+    "java": ("Follow the Google Java Style Guide.", "https://google.github.io/styleguide/javaguide.html"),
+    "kotlin": ("Follow Kotlin coding conventions.", "https://kotlinlang.org/docs/coding-conventions.html"),
+    "javascript": WEB_STYLE,
+    "typescript": WEB_STYLE,
+    "csharp": ("Follow Microsoft's C# coding conventions.",
+               "https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/coding-style/coding-conventions"),
+}
+ALIASES = {"js": "javascript", "ts": "typescript", "c#": "csharp"}
+DIRECTORY = Path("config/style-defaults")
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def validate_relative(value):
+    if not all(re.fullmatch(r"(?!\.git$)\.?[a-zA-Z0-9_][a-zA-Z0-9_.+-]*", part, re.I)
+               for part in value.split("/")):
+        raise ValueError("Use a relative path of directory names under repos/.")
+
+
+def validate_guide(guide, source):
+    if not isinstance(guide, str) or not guide.strip() or not guide.isprintable():
+        raise ValueError("Use a nonempty single-line guide.")
+    if not isinstance(source, str) or not source.isprintable() or any(c.isspace() for c in source):
+        raise ValueError("Use a credential-free HTTPS source URL.")
+    url = urlsplit(source)
+    if url.scheme != "https" or not url.hostname or url.username is not None or "\\" in source:
+        raise ValueError("Use a credential-free HTTPS source URL.")
+
+
+def filename(checkout, scope, stack):
+    key = "\0".join((checkout, scope, stack)).encode()
+    return hashlib.sha256(key).hexdigest() + ".json"
+
+
+def read_json(directory, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    with os.fdopen(fd, encoding="utf-8") as stream:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"Expected a regular file at {name}.")
+        return json.load(stream)
+
+
+def publish(directory, name, selection):
+    # A hard link publishes a complete record atomically without replacing an owner's choice.
+    temporary = ".pending-" + secrets.token_hex(16)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(selection, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+    finally:
+        os.unlink(temporary, dir_fd=directory)
+
+
+def select(args, directory, stack):
+    scope = Path(args.scope)
+    scopes = [scope, *scope.parents] if args.lookup else [scope]
+    for candidate in scopes:
+        name = filename(args.checkout, str(candidate), stack)
+        identity = {"checkout": args.checkout, "scope": str(candidate), "stack": stack, "precedence": "fallback"}
+        try:
+            saved = read_json(directory, name)
+        except FileNotFoundError:
+            if args.lookup:
+                continue
+            if args.guide is not None:
+                guide, source = args.guide, args.source
+            elif stack in DEFAULTS:
+                guide, source = DEFAULTS[stack]
+            else:
+                raise ValueError("Specify --guide and --source for a stack without a built-in convention.") from None
+            saved = {**identity, "guide": guide, "source": source}
+            try:
+                publish(directory, name, saved)
+            except FileExistsError:
+                saved = read_json(directory, name)
+        if not isinstance(saved, dict) or any(saved.get(k) != v for k, v in identity.items()):
+            raise ValueError(f"Invalid selection at {DIRECTORY / name}.")
+        validate_guide(saved.get("guide"), saved.get("source"))
+        if args.guide is not None and (args.guide, args.source) != (saved["guide"], saved["source"]):
+            raise ValueError(f"A different selection already exists at {DIRECTORY / name}.")
+        return {"path": str(DIRECTORY / name), "selection": saved}
+    return {"path": None, "selection": None}
+
+
+def run(args):
+    validate_relative(args.checkout)
+    if args.scope != "." and (not args.scope.isprintable() or
+                              any(part.lower() in ("", ".", "..", ".git") for part in args.scope.split("/"))):
+        raise ValueError("Use a checkout-relative component directory.")
+    stack = args.stack.lower()
+    stack = ALIASES.get(stack, stack)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_.+#-]*", stack):
+        raise ValueError("Use a stack identifier such as python, go, or typescript.")
+    if (args.guide is None) != (args.source is None) or (args.lookup and args.guide is not None):
+        raise ValueError("Use --guide and --source together when saving a selection.")
+    if args.guide is not None:
+        validate_guide(args.guide, args.source)
+
+    project = args.project.absolute()
+    target = project / "repos" / args.checkout / args.scope
+    if target.resolve() != target:
+        raise ValueError("Symlinks or parent traversal in the project, checkout or scope are unsupported.")
+    with ExitStack() as opened:
+        directory = os.open(project, DIRECTORY_FLAGS)
+        opened.callback(os.close, directory)
+        manifest = read_json(directory, "project.yaml")
+        if not isinstance(manifest, dict) or manifest.get("project") != project.name:
+            raise ValueError("Expected a registered ai-dev project directory.")
+        for part in DIRECTORY.parts:
+            try:
+                if not args.lookup:
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=directory)
+                    except FileExistsError:
+                        pass
+                directory = os.open(part, DIRECTORY_FLAGS, dir_fd=directory)
+            except FileNotFoundError:
+                if args.lookup:
+                    return {"path": None, "selection": None}
+                raise
+            opened.callback(os.close, directory)
+        return select(args, directory, stack)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("project", type=Path, help="registered ai-dev project directory")
+    parser.add_argument("checkout", help="planned or existing checkout path under repos/")
+    parser.add_argument("--stack", required=True, help="stack identifier, e.g. python, go, or typescript")
+    parser.add_argument("--scope", default=".", help="component directory relative to checkout (default: root)")
+    parser.add_argument("--guide", help="explicit fallback convention, paired with --source")
+    parser.add_argument("--source", help="HTTPS reference for the explicit convention")
+    parser.add_argument("--lookup", action="store_true", help="read the nearest saved convention for this scope")
+    args = parser.parse_args()
+    try:
+        result = run(args)
+    except (OSError, ValueError, RuntimeError) as error:
+        print(json.dumps({"error": str(error)}))
+        return 2
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

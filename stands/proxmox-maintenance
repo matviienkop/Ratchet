@@ -1,0 +1,289 @@
+#!/usr/bin/python3 -I
+"""Operator-installed node-side broker for a pinned VM. Input is one verb."""
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import subprocess
+import sys
+import tempfile
+
+QM = "/usr/sbin/qm"
+PVESH = "/usr/bin/pvesh"
+STATE = Path("/var/lib/ai-dev-stand-maintenance")
+ACTIONS = ("inspect", "reset", "reinstall", "restore-previous")
+
+
+def trusted(path, executable=False):
+    path = Path(path)
+    if not path.is_absolute() or path != path.resolve():
+        raise ValueError("Registered operator file must be a canonical absolute path")
+    for item in (*reversed(path.parents), path):
+        info = item.lstat()
+        if info.st_uid != 0 or info.st_mode & 0o022 or (item != path and not stat.S_ISDIR(info.st_mode)):
+            raise ValueError("Operator file or directory is writable by another identity")
+    if not stat.S_ISREG(path.stat().st_mode) or (executable and not os.access(path, os.X_OK)):
+        raise ValueError("Operator file has the wrong type or permissions")
+    return path
+
+
+def invoke(argv, *, timeout=900):
+    proc = subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout, cwd="/",
+                          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C"})
+    if proc.returncode:
+        raise ValueError(f"{Path(argv[0]).name} failed with exit {proc.returncode}: " +
+                         proc.stderr.decode(errors="replace")[-600:])
+    return proc.stdout
+
+
+def fingerprint(value):
+    # PVE's digest is a digest of the whole VM config file, including other snapshots.
+    content = {k: v for k, v in value.items() if k not in ("digest", "parent", "runningcpu", "runningmachine")}
+    return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def boundary(config):
+    return {k: v for k, v in config.items() if re.fullmatch(
+        r"net\d+|ipconfig\d+|hostpci\d+|usb\d+|virtiofs\d+|serial\d+|parallel\d+|ivshmem|args|hookscript|cicustom", k)}
+
+
+class Maintenance:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.vmid = str(cfg["vmid"])
+        node = cfg["node"]
+        if not re.fullmatch(r"[1-9][0-9]{2,8}", self.vmid) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", node):
+            raise ValueError("Invalid operator target")
+        self.api = f"/nodes/{node}/qemu/{self.vmid}/"
+        self.journal = STATE / (self.vmid + ".json")
+
+    def get(self, resource, *options):
+        return json.loads(invoke([PVESH, "get", self.api + resource, *options, "--output-format", "json"]))
+
+    def qm(self, verb, *args):
+        return invoke([QM, verb, self.vmid, *args])
+
+    def verify(self, config):
+        schema = dict(i.split("=", 1) for i in config.get("smbios1", "").split(",") if "=" in i)
+        if (config.get("name"), schema.get("uuid")) != (self.cfg["name"], self.cfg["uuid"]):
+            raise ValueError("VM identity differs from registered name/UUID")
+        if config.get("template") or config.get("lock"):
+            raise ValueError("Guest is a template or has a Proxmox operation in progress")
+        if boundary(config) != self.cfg["isolation"]:
+            raise ValueError("VM network, passthrough or startup configuration differs from registered isolation")
+        return config
+
+    def live(self):
+        changes = self.get("pending")
+        if any("pending" in item or item.get("delete") for item in changes):
+            raise ValueError("Pending Proxmox configuration must be reconciled before maintenance")
+        return self.verify(self.get("config", "--current", "1"))
+
+    def snapshot(self, name):
+        if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,39}", name) or name == "current":
+            raise ValueError("Invalid snapshot name")
+        config = self.get("snapshot/" + name + "/config")
+        self.verify(config)
+        if config.get("vmstate"):
+            raise ValueError("Restore requires a disk-only snapshot")
+        return config
+
+    def baseline(self, live):
+        src = self.cfg["baseline"]
+        if src["type"] == "snapshot":
+            if fingerprint(self.snapshot(src["name"])) != src["config_sha256"]:
+                raise ValueError("Baseline snapshot fingerprint changed")
+            return
+        if src["type"] != "image":
+            raise ValueError("Unrecognized baseline source")
+        disk, storage = src["disk"], src["storage"]
+        if not re.fullmatch(r"(?:scsi|virtio|sata)[0-9]+", disk) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", storage):
+            raise ValueError("Invalid boot disk or storage")
+        # Only the scoped boot disk is replaced. Extra mutable disks invalidate a clean-OS claim.
+        drives = {k: v for k, v in live.items() if re.fullmatch(r"(?:scsi|virtio|sata|ide)[0-9]+", k)}
+        if disk not in drives or not drives[disk].startswith(storage + ":") or any(
+                "media=cdrom" not in value.split(",") for k, value in drives.items() if k != disk):
+            raise ValueError("Image reset needs one mutable boot disk on its registered storage")
+        if "media=cdrom" in drives[disk].split(",") or (live.get("boot") or "").split(";")[0] != "order=" + disk:
+            raise ValueError("Selected slot is not first in boot order")
+        volume = drives[disk].split(",", 1)[0].split(":", 1)[1].rsplit("/", 1)[-1]
+        if not re.fullmatch(r"vm-" + self.vmid + r"-[A-Za-z0-9._-]+", volume):
+            raise ValueError("Boot disk volume is not owned by the registered VM")
+        size = src.get("size_gib")
+        if size is not None and (type(size) is not int or not 1 <= size <= 1024):
+            raise ValueError("Invalid registered boot disk size")
+        image = trusted(src["path"])
+        if "," in str(image) or not re.fullmatch(r"[a-fA-F0-9]{64}", src["sha256"]):
+            raise ValueError("Invalid registered image path or digest")
+        with image.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != src["sha256"].lower():
+                raise ValueError("Registered image SHA-256 mismatch")
+        if src["format"] not in ("raw", "qcow2"):
+            raise ValueError("Unsupported registered image format")
+        info = json.loads(invoke(["/usr/bin/qemu-img", "info", "--output=json", str(image)]))
+        details = info.get("format-specific", {}).get("data", {})
+        if info["format"] != src["format"] or info.get("backing-filename") or details.get("data-file"):
+            raise ValueError("Baseline must be a self-contained registered disk image")
+
+    def media(self, live):
+        for slot, asset in self.cfg.get("media", {}).items():
+            if not re.fullmatch(r"(?:ide|sata)[0-9]+", slot):
+                raise ValueError("Invalid registered CD-ROM slot")
+            volume = asset["volume"]
+            if not re.fullmatch(r"[A-Za-z0-9_-]+:iso/[A-Za-z0-9_.-]+", volume):
+                raise ValueError("Invalid registered CD-ROM volume")
+            device = live.get(slot, "").split(",")
+            if "media=cdrom" not in device or device[0] not in [volume, *asset.get("replaces", [])]:
+                raise ValueError("Registered media slot refers to an unexpected device")
+            path = trusted(invoke(["/usr/sbin/pvesm", "path", volume]).decode().strip())
+            with path.open("rb") as stream:
+                if hashlib.file_digest(stream, "sha256").hexdigest() != asset["sha256"]:
+                    raise ValueError("Registered CD-ROM checksum mismatch")
+
+    def attach_media(self, live):
+        for slot, asset in self.cfg.get("media", {}).items():
+            if live[slot].split(",")[0] != asset["volume"]:
+                self.qm("set", "--" + slot, asset["volume"] + ",media=cdrom")
+        current = self.live()
+        if any(current[slot].split(",")[0] != asset["volume"] for slot, asset in self.cfg.get("media", {}).items()):
+            raise ValueError("Cannot verify registered CD-ROM attachment")
+
+    def save(self, record):
+        with tempfile.NamedTemporaryFile(mode="w", dir=STATE, delete=False) as stream:
+            json.dump(record, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(stream.name, self.journal)
+        fd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def status(self):
+        return self.get("status/current")["status"]
+
+    def halt(self):
+        status = self.status()
+        if status == "running":
+            self.qm("shutdown", "--timeout", "180")
+        if self.status() != "stopped":
+            raise ValueError("Guest did not shut down cleanly")
+
+    def run(self, action):
+        live = self.live()
+        if action == "inspect":
+            result = {"vmid": self.vmid, "name": live["name"], "isolation": boundary(live),
+                      "power": self.status(), "snapshots": self.get("snapshot")}
+            src = self.cfg.get("baseline", {})
+            if src.get("type") == "snapshot":
+                result["baseline_config_sha256"] = fingerprint(self.snapshot(src["name"]))
+            if src.get("type") == "image":
+                self.baseline(live)
+                result["image_verified"] = True
+            self.media(live)
+            result["media_verified"] = sorted(self.cfg.get("media", {}))
+            if self.journal.exists():
+                result["recovery"] = json.loads(self.journal.read_text())
+            return result
+        if action not in ACTIONS or action not in self.cfg.get("operations", []):
+            raise ValueError("Maintenance operation is outside this VM's grant")
+        previous = json.loads(self.journal.read_text()) if self.journal.exists() else {}
+        if action == "restore-previous":
+            if not previous or previous["vmid"] != self.vmid or previous["uuid"] != self.cfg["uuid"]:
+                raise ValueError("No recovery checkpoint for this VM identity")
+            if previous["phase"] == "restored":
+                return previous
+            name = previous["checkpoint"]
+            recovery = self.snapshot(name)
+            if not previous.get("checkpoint_sha256") or fingerprint(recovery) != previous["checkpoint_sha256"]:
+                raise ValueError("Recovery snapshot cannot be authenticated; operator reconciliation required")
+            self.halt()
+            self.qm("rollback", name)
+            self.live()
+            if previous["power"] == "running" and self.status() == "stopped":
+                self.qm("start")
+            if self.status() != previous["power"]:
+                raise ValueError("Recovery did not restore original power state")
+            previous["phase"] = "restored"
+            self.save(previous)
+            return previous
+        if previous and previous["phase"] not in ("complete", "restored"):
+            raise ValueError("Previous maintenance interrupted. Inspect the checkpoint before another operation")
+        self.media(live)
+        if action == "reset":
+            self.baseline(live)
+        else:
+            script = trusted(self.cfg["bootstrap"], executable=True)
+        snapshots = self.get("snapshot")
+        max_checkpoints = self.cfg.get("max_checkpoints", 4)
+        if type(max_checkpoints) is not int or not 1 <= max_checkpoints <= 32:
+            raise ValueError("Invalid operator checkpoint limit")
+        if sum(s["name"].startswith("aidevpre") for s in snapshots) >= max_checkpoints:
+            raise ValueError("Recovery checkpoints at capacity; operator retention needed")
+        power = self.status()
+        if power not in ("running", "stopped"):
+            raise ValueError("Guest power state is unsuitable for maintenance")
+        rec = {"vmid": self.vmid, "uuid": self.cfg["uuid"], "operation": action, "power": power,
+               "checkpoint": "aidevpre" + secrets.token_hex(8), "phase": "checkpoint-pending"}
+        self.save(rec)
+        self.halt()
+        self.qm("snapshot", rec["checkpoint"], "--vmstate", "0")
+        rec.update(checkpoint_sha256=fingerprint(self.snapshot(rec["checkpoint"])), phase="applying")
+        self.save(rec)
+        self.live()
+        if action == "reset":
+            src = self.cfg["baseline"]
+            if src["type"] == "snapshot":
+                self.qm("rollback", src["name"])
+            else:
+                disk, old = src["disk"], live[src["disk"]].split(",")[0]
+                self.qm("set", "--" + disk, src["storage"] + ":0,import-from=" + src["path"])
+                fresh = self.live()
+                if fresh[disk].split(",")[0] == old or not any(
+                        r.split(",")[0] == old for k, r in fresh.items() if re.fullmatch("unused[0-9]+", k)):
+                    raise ValueError("Imported boot volume or retained original cannot be confirmed")
+                if src.get("size_gib"):
+                    self.qm("resize", disk, str(src["size_gib"]) + "G")
+        self.attach_media(self.live())
+        if action == "reinstall":
+            # No arguments, cwd, stdin or environment come from the caller.
+            invoke([str(script)])
+        self.live()
+        if fingerprint(self.snapshot(rec["checkpoint"])) != rec["checkpoint_sha256"]:
+            raise ValueError("Original recovery snapshot changed")
+        if power == "running" and self.status() == "stopped":
+            self.qm("start")
+        if power == "stopped":
+            self.halt()
+        if self.status() != power:
+            raise ValueError("Prior power state was not restored")
+        rec["phase"] = "complete"
+        self.save(rec)
+        return rec
+
+
+def main(args):
+    if len(args) != 1 or args[0] not in ACTIONS:
+        raise ValueError("Supply exactly one maintenance operation")
+    cfg = json.loads(trusted(__file__ + ".json").read_text())
+    broker = Maintenance(cfg)
+    STATE.mkdir(mode=0o700, exist_ok=True)
+    info = STATE.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid or info.st_mode & 0o077:
+        raise ValueError("Invalid maintenance journal directory")
+    with (STATE / (broker.vmid + ".lock")).open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        print(json.dumps(broker.run(args[0]), ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as exc:
+        sys.exit("Maintenance failed: " + str(exc))

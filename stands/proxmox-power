@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Power one preconfigured Proxmox VM using a VM-scoped API token."""
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def power(action, config):
+    if action not in ("start", "status", "shutdown"):
+        raise ValueError("Expected start, status or shutdown.")
+    api = config["api"].rstrip("/") + "/api2/json/nodes/" + config["node"] + "/qemu/" + str(config["vmid"]) + "/status/"
+    env = {"PATH": "/usr/bin:/bin", "LANG": "C"}
+    curl = ["/usr/bin/curl", "-q", "--noproxy", "*", "--silent", "--show-error", "--fail", "--connect-timeout", "5", "--max-time", "20",
+            "--cacert", config["ca"], "--resolve", config["resolve"], "--header", "@" + config["authorization"]]
+
+    def status():
+        result = subprocess.check_output([*curl, api + "current"], env=env)
+        vm = json.loads(result)["data"]
+        if vm["name"] != config["name"]:
+            raise ValueError("Registered VM identity mismatch.")
+        return vm["status"]
+
+    before = status()
+    if action == "status":
+        return before
+    target = "running" if action == "start" else "stopped"
+    if before != target:
+        subprocess.run([*curl, "--request", "POST", api + action], check=True, stdout=subprocess.DEVNULL, env=env)
+        for _ in range(90):
+            if status() == target:
+                break
+            time.sleep(2)
+        else:
+            raise ValueError("VM did not reach " + target)
+    return target
+
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) != 2:
+            raise ValueError("Supply one action.")
+        print(power(sys.argv[1], json.loads(Path(__file__ + ".json").read_text())))
+    except (OSError, KeyError, ValueError, subprocess.SubprocessError) as exc:
+        sys.exit(str(exc))

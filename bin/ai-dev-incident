@@ -1,0 +1,462 @@
+#!/usr/bin/env python3
+"""Identify a task incident and find its existing tracker records in paginated results."""
+
+import argparse
+from contextlib import contextmanager
+import fcntl
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from ai_dev.redact import sanitize
+
+
+def markers(project, provider, task, step, symptom):
+    identity = [field.strip() for field in (project, provider, task, step, symptom)]
+    if not all(identity):
+        raise ValueError("All five incident identity fields must have a value.")
+    digest = hashlib.sha256(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    return {role: f"ai-dev-incident:v1:{digest}:{role}" for role in ("comment", "follow-up", "blocked", "resolved")}
+
+
+def locate(marker, pages):
+    if not re.fullmatch(r"ai-dev-incident:v1:[0-9a-f]{64}:(comment|follow-up|blocked|resolved)", marker):
+        raise ValueError("Supply an incident marker from the markers command.")
+    if not isinstance(pages, list) or not pages:
+        raise ValueError("Supply all pages, including one empty page for an empty result.")
+    matches = set()
+    for page in pages:
+        if not isinstance(page, list):
+            raise ValueError("Each page must be a list of tracker records.")
+        for record in page:
+            if not isinstance(record, dict) or "body" not in record or type(record.get("id")) not in (str, int):
+                raise ValueError("Each record requires an ID and body.")
+            identity, body = str(record["id"]), record["body"]
+            if not identity.strip() or (body is not None and not isinstance(body, str)):
+                raise ValueError("Invalid tracker ID or body.")
+            if marker in (body or "").splitlines():
+                matches.add(identity)
+    if len(matches) > 1:
+        raise ValueError("Multiple records contain this marker. Reconcile them before writing.")
+    if matches:
+        return {"status": "found", "id": matches.pop()}
+    return {"status": "absent"}
+
+
+REPOSITORY = r"[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+"
+
+
+def checked_path(path):
+    path = Path(path).absolute()
+    if path.resolve() != path:
+        raise ValueError("Unexpected symlink in an incident workflow path.")
+    return path
+
+
+def public_text(raw, token):
+    text = raw.strip()
+    if not text or len(text) > 60000 or token in text or sanitize(text) != text:
+        raise ValueError("Prepare a nonempty, sanitized public narrative.")
+    if ("ai-dev-incident:v1:" in text or re.search(r"[\x00-\x08\x0b-\x1f\x7f]", text)
+            or re.search(r"(?i)(?:/home/|/root/|/tmp/|/run/secrets/|[a-z]:\\users\\|https?://[^\s)]+\?)", text)):
+        raise ValueError("Remove private paths, signed/query URLs, control characters, or tracker markers.")
+    return text
+
+
+class RejectedWrite(ValueError):
+    pass
+
+
+class GitHub:
+    def __init__(self, token):
+        self.headers = {"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
+                        "Content-Type": "application/json", "User-Agent": "ai-dev-incident"}
+
+    def request(self, method, path, body=None):
+        connection = http.client.HTTPSConnection("api.github.com", timeout=30)
+        try:
+            connection.request(method, path, headers=self.headers,
+                               body=json.dumps(body).encode() if body is not None else None)
+            response = connection.getresponse()
+            if response.status not in (200, 201):
+                error = RejectedWrite if response.status in (400, 401, 403, 404, 405, 409, 422, 429) else ValueError
+                raise error(f"GitHub {method} returned HTTP {response.status}.")
+            return json.loads(response.read())
+        finally:
+            connection.close()
+
+
+class IncidentSync:
+    def __init__(self, api, repo, parent, directory):
+        self.api, self.repo, self.parent = api, repo, parent
+        self.root = f"/repos/{repo}/issues"
+        self.parent_url = f"https://github.com/{repo}/issues/{parent}"
+        self.directory = directory
+        self.state_path = checked_path(directory / "records.json")
+        self.state = json.loads(self.state_path.read_bytes()) if self.state_path.exists() else {}
+
+    def save(self, marker, data):
+        self.state[marker] = data
+        with tempfile.NamedTemporaryFile(dir=self.directory, delete=False) as stream:
+            tmp = Path(stream.name)
+            try:
+                stream.write(json.dumps(self.state).encode())
+                stream.flush()
+                os.fsync(stream.fileno())
+                tmp.replace(self.state_path)
+                fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            finally:
+                tmp.unlink(missing_ok=True)
+
+    def check_parent(self):
+        parent = self.api.request("GET", f"{self.root}/{self.parent}")
+        if (not isinstance(parent, dict) or parent.get("html_url", "").lower() != self.parent_url.lower()
+                or "pull_request" in parent or parent.get("number") != self.parent or parent.get("state") != "open"):
+            raise ValueError("The scoped parent is not an open GitHub issue.")
+        self.actor = self.api.request("GET", "/user").get("id")
+        if type(self.actor) is not int or self.actor <= 0:
+            raise ValueError("Unable to verify the authenticated GitHub user.")
+
+    def find(self, marker, child):
+        collection = self.root if child else f"{self.root}/{self.parent}/comments"
+        query = "state=all&sort=created&direction=asc&" if child else ""
+        page, matches = 1, set()
+        while True:
+            records = self.api.request("GET", f"{collection}?{query}per_page=100&page={page}")
+            if not isinstance(records, list):
+                raise ValueError("Incomplete GitHub listing.")
+            for record in records:
+                if not isinstance(record, dict) or "body" not in record:
+                    raise ValueError("Incomplete GitHub record.")
+                if child and "pull_request" in record:
+                    continue
+                if marker in (record["body"] or "").splitlines():
+                    matches.add(self.verify_identity(record, child))
+            if len(records) < 100:
+                break
+            page += 1
+        if len(matches) > 1:
+            raise ValueError("Multiple GitHub records contain the incident marker.")
+        return next(iter(matches), None)
+
+    def verify_identity(self, record, child):
+        identity = record.get("number" if child else "id")
+        if type(identity) is not int or identity <= 0:
+            raise ValueError("GitHub returned an invalid incident record ID.")
+        url = (f"https://github.com/{self.repo}/issues/{identity}" if child
+               else f"{self.parent_url}#issuecomment-{identity}")
+        if (record.get("html_url", "").lower() != url.lower() or record.get("user", {}).get("id") != self.actor
+                or "pull_request" in record or (child and identity == self.parent)):
+            raise ValueError("Incident record has an unexpected owner, parent or repository.")
+        return identity
+
+    def read_record(self, identity, child, marker):
+        path = f"{self.root}/{identity}" if child else f"{self.root}/comments/{identity}"
+        record = self.api.request("GET", path)
+        if (self.verify_identity(record, child) != identity or marker not in (record.get("body") or "").splitlines()
+                or (child and f"Parent: {self.parent_url}" not in record["body"].splitlines())):
+            raise ValueError("Incident record no longer matches the scoped task.")
+        return path, record
+
+    def read_existing_follow_up(self, identity):
+        issue = self.api.request("GET", f"{self.root}/{identity}")
+        url = f"https://github.com/{self.repo}/issues/{identity}"
+        if (identity <= 0 or identity == self.parent or not isinstance(issue, dict)
+                or issue.get("number") != identity or issue.get("html_url", "").lower() != url.lower()
+                or "pull_request" in issue or issue.get("state") not in ("open", "closed")
+                or f"parent: {self.parent_url.lower()}" not in (issue.get("body") or "").lower().splitlines()):
+            raise ValueError("The existing follow-up must be a scoped GitHub issue with an explicit parent link.")
+        return issue
+
+    def blocked_by_path(self):
+        return f"{self.root}/{self.parent}/dependencies/blocked_by"
+
+    def is_blocked_by(self, issue):
+        identity = issue.get("id")
+        if type(identity) is not int or identity <= 0:
+            raise ValueError("GitHub returned an invalid follow-up database ID.")
+        url = issue["html_url"].lower()
+        page = 1
+        while True:
+            records = self.api.request("GET", f"{self.blocked_by_path()}?per_page=100&page={page}")
+            if not isinstance(records, list):
+                raise ValueError("Incomplete GitHub dependency listing.")
+            for record in records:
+                if not isinstance(record, dict) or type(record.get("id")) is not int or not isinstance(record.get("html_url"), str):
+                    raise ValueError("Incomplete GitHub dependency record.")
+                same_id = record["id"] == identity
+                same_url = record["html_url"].lower() == url
+                if same_id != same_url or (same_id and "pull_request" in record):
+                    raise ValueError("GitHub dependency has an unexpected issue identity.")
+                if same_id:
+                    return True
+            if len(records) < 100:
+                return False
+            page += 1
+
+    def ensure_blocked_by(self, issue):
+        if self.is_blocked_by(issue):
+            return
+        if issue.get("state") != "open":
+            raise ValueError("The follow-up is closed. Reconcile it before creating a blocking dependency.")
+        try:
+            self.api.request("POST", self.blocked_by_path(), {"issue_id": issue["id"]})
+        except (ValueError, OSError, http.client.HTTPException):
+            if self.is_blocked_by(issue):
+                return
+            raise
+        if not self.is_blocked_by(issue):
+            raise ValueError("GitHub did not confirm the blocking dependency on readback.")
+
+    def status(self, follow_up, check_dependency=False):
+        known = [(marker, record) for marker, record in self.state.items()
+                 if re.fullmatch(r"ai-dev-incident:v1:[0-9a-f]{64}:follow-up", marker)
+                 and record.get("id") == follow_up and (record.get("confirmed") or record.get("adopted"))
+                 and not record.get("pending")]
+        if len(known) != 1:
+            raise ValueError("No unique confirmed follow-up matches this parent and issue number.")
+        self.check_parent()
+        marker, record = known[0]
+        if record.get("adopted"):
+            issue = self.read_existing_follow_up(follow_up)
+        else:
+            _, issue = self.read_record(follow_up, True, marker)
+        state, reason = issue.get("state"), issue.get("state_reason")
+        if state not in ("open", "closed") or reason not in (None, "completed", "not_planned", "reopened", "duplicate"):
+            raise ValueError("Unrecognized GitHub issue state or state reason.")
+        result = {"state": state, "state_reason": reason, "url": issue["html_url"]}
+        if check_dependency:
+            result["blocked_by"] = self.is_blocked_by(issue)
+        return result
+
+    @staticmethod
+    def fingerprint(payload):
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    def sync_record(self, marker, body, title=None):
+        child = title is not None
+        payload = {"body": body + "\n\n" + marker}
+        if child:
+            payload["title"] = title
+        desired = self.fingerprint(payload)
+        saved = self.state.get(marker, {})
+        identity = saved.get("id") or self.find(marker, child)
+        old_hash = None
+        if identity:
+            path, existing = self.read_record(identity, child, marker)
+            old_hash = self.fingerprint({k: existing.get(k) for k in payload})
+            if saved.get("pending") == old_hash:
+                saved = {"id": identity, "confirmed": old_hash}
+                self.save(marker, saved)
+            if saved.get("pending"):
+                raise ValueError("Previous GitHub update has an uncertain outcome. Reconcile before retrying.")
+            if old_hash == desired:
+                self.save(marker, {"id": identity, "confirmed": desired})
+                return identity
+            if saved.get("confirmed") != old_hash:
+                raise ValueError("GitHub content changed outside this run. Reconcile the edit before writing.")
+            if child and existing.get("state") != "open":
+                raise ValueError("A closed follow-up requires human reconciliation before editing.")
+            method = "PATCH"
+        else:
+            if saved.get("pending"):
+                raise ValueError("Previous GitHub creation has an uncertain outcome. Reconcile before retrying.")
+            path = self.root if child else f"{self.root}/{self.parent}/comments"
+            method = "POST"
+        self.save(marker, {**saved, "pending": desired})
+        try:
+            receipt = self.api.request(method, path, payload)
+        except RejectedWrite:
+            self.save(marker, saved)
+            raise
+        actual = self.verify_identity(receipt, child)
+        if identity and actual != identity:
+            raise ValueError("GitHub write receipt belongs to another record.")
+        self.save(marker, {**saved, "id": actual, "pending": desired})
+        _, readback = self.read_record(actual, child, marker)
+        if any(readback.get(k) != v for k, v in payload.items()):
+            raise ValueError("GitHub readback differs from the intended incident update.")
+        self.save(marker, {"id": actual, "confirmed": desired})
+        return actual
+
+    def sync(self, keys, comment, title=None, followup=None, existing=None, blocking=False):
+        self.check_parent()
+        marker = keys["follow-up"]
+        child_receipt = self.state.get(marker, {})
+        child = child_receipt.get("id") if child_receipt.get("confirmed") else None
+        if child_receipt.get("adopted"):
+            child = child_receipt["id"]
+            if followup is not None:
+                raise ValueError("The existing follow-up is linked without editing its issue.")
+            if existing is not None and existing != child:
+                raise ValueError("A different follow-up is already linked for this incident.")
+            self.read_existing_follow_up(child)
+        elif existing is not None:
+            if child_receipt.get("pending"):
+                raise ValueError("Reconcile the pending follow-up write before linking another record.")
+            if any(key != marker and key.endswith(":follow-up") and record.get("id") == existing
+                   for key, record in self.state.items()):
+                raise ValueError("This follow-up already belongs to another incident on the parent.")
+            self.read_existing_follow_up(existing)
+            matched = child or self.find(marker, True)
+            if matched is not None and matched != existing:
+                raise ValueError("A different follow-up is already linked for this incident.")
+            child = existing
+            if not child_receipt.get("confirmed"):
+                self.save(marker, {"id": child, "adopted": True})
+        if blocking and child is None and followup is None:
+            raise ValueError("A blocking incident requires a follow-up issue.")
+
+        def parent_body():
+            return comment + (f"\n\nFollow-up: https://github.com/{self.repo}/issues/{child}" if child else "")
+
+        comment_id = self.sync_record(keys["comment"], parent_body())
+        if followup is not None:
+            child = self.sync_record(marker, f"Parent: {self.parent_url}\n\n{followup}", title)
+            self.sync_record(keys["comment"], parent_body())
+        result = {"status": "confirmed", "parent": self.parent_url,
+                  "comment": f"{self.parent_url}#issuecomment-{comment_id}",
+                  "follow_up": f"https://github.com/{self.repo}/issues/{child}" if child else None}
+        if blocking:
+            if self.state[marker].get("adopted"):
+                issue = self.read_existing_follow_up(child)
+            else:
+                _, issue = self.read_record(child, True, marker)
+            self.ensure_blocked_by(issue)
+            result["blocked_by"] = True
+        return result
+
+
+def github_binding(args, *, write):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", args.project) or not os.environ.get("AI_DEV_WORKSPACE"):
+        raise ValueError("Supply a registered project slug and set AI_DEV_WORKSPACE.")
+    project = checked_path(Path(os.environ["AI_DEV_WORKSPACE"]) / args.project)
+    manifest = json.loads(checked_path(project / "project.yaml").read_bytes())
+    tasks = manifest.get("tasks", {})
+    scope = tasks.get("scope", {})
+    repo = scope.get("repository", "")
+    if (manifest.get("project") != args.project or tasks.get("provider") != "github-issues"
+            or not re.fullmatch(REPOSITORY, repo) or repo.split("/")[1] in (".", "..")):
+        raise ValueError("The registered project needs an explicit GitHub Issues tracker repository.")
+    if write and scope.get("writes") not in (None, "explicit_authorization_only"):
+        raise ValueError("The tracker's write policy does not permit this operation.")
+    expected_url = f"https://github.com/{repo}/issues"
+    if scope.get("issues_url", expected_url).rstrip("/").lower() != expected_url.lower():
+        raise ValueError("Tracker URL conflicts with its registered repository.")
+    match = re.fullmatch(re.escape(repo) + r"#([1-9][0-9]*)", args.task, re.I)
+    if not match:
+        raise ValueError("Supply the canonical OWNER/REPO#NUMBER in the registered tracker.")
+    parent = int(match[1])
+    credentials = checked_path(Path.home() / ".config/ai-dev/credentials" / args.project)
+    token_file = checked_path(Path(args.token_file).expanduser() if args.token_file else credentials / "github-token")
+    if token_file.parent != credentials or not token_file.is_file() or token_file.stat().st_mode & 0o077:
+        raise ValueError("Use a private token file in this project's configured credentials directory.")
+    token = token_file.read_text().strip()
+    if not token or not re.fullmatch(r"[A-Za-z0-9_.-]+", token):
+        raise ValueError("Invalid project GitHub credential.")
+    parent_key = hashlib.sha256(f"{repo.lower()}#{parent}".encode()).hexdigest()
+    directory = checked_path(project / "runs" / ".incident-sync" / parent_key)
+    return repo, parent, directory, token
+
+
+@contextmanager
+def parent_lock(directory, *, write):
+    if write:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    elif not directory.is_dir():
+        raise ValueError("No confirmed incident records exist for this parent.")
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX if write else fcntl.LOCK_SH)
+        yield
+    finally:
+        os.close(fd)
+
+
+def github_sync(args):
+    repo, parent, directory, token = github_binding(args, write=True)
+    if bool(args.follow_up_title) != bool(args.follow_up_file):
+        raise ValueError("Supply both the follow-up title and file.")
+    existing = getattr(args, "existing_follow_up", None)
+    if existing is not None and (existing <= 0 or existing == parent or args.follow_up_title):
+        raise ValueError("Supply an existing issue distinct from its parent, or supply a new title and file.")
+    title = public_text(args.follow_up_title, token) if args.follow_up_title else None
+    if title and ("\n" in title or len(title) > 256):
+        raise ValueError("Use a single-line GitHub issue title of at most 256 characters.")
+    comment = public_text(args.comment_file.read_text(), token)
+    followup = public_text(args.follow_up_file.read_text(), token) if args.follow_up_file else None
+    impact = getattr(args, "impact", None)
+    if impact is not None:
+        description = {"blocking": "Blocks parent acceptance.", "nonblocking": "Parent work can continue."}
+        comment = public_text(f"{comment}\n\nImpact: {description[impact]}", token)
+    keys = markers(args.project, "github-issues", f"{repo}#{parent}", args.step, args.symptom)
+    with parent_lock(directory, write=True):
+        receipt = IncidentSync(GitHub(token), repo, parent, directory).sync(
+            keys, comment, title, followup, existing, blocking=impact == "blocking")
+    if impact is not None:
+        receipt["impact"] = impact
+    return receipt
+
+
+def github_status(args):
+    repo, parent, directory, token = github_binding(args, write=False)
+    if args.follow_up <= 0 or args.follow_up == parent:
+        raise ValueError("Supply a positive follow-up issue number distinct from its parent.")
+    with parent_lock(directory, write=False):
+        return IncidentSync(GitHub(token), repo, parent, directory).status(
+            args.follow_up, check_dependency=getattr(args, "blocked_by", False))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    create = commands.add_parser("markers", help="derive stable markers from the project and scoped parent task")
+    for field in ("project", "provider", "task", "step", "symptom"):
+        create.add_argument("--" + field, required=True)
+    lookup = commands.add_parser("locate", help="read a JSON array of pages from stdin and match a marker line")
+    lookup.add_argument("marker")
+    sync = commands.add_parser("github-sync", help="synchronize authorized incident records with the configured tracker")
+    status = commands.add_parser("github-status", help="read a confirmed follow-up's GitHub issue state")
+    for cmd in (sync, status):
+        cmd.add_argument("project")
+        cmd.add_argument("--task", required=True)
+        cmd.add_argument("--token-file")
+    status.add_argument("--follow-up", type=int, required=True)
+    status.add_argument("--blocked-by", action="store_true", help="verify the native blocking relationship")
+    for field in ("step", "symptom"):
+        sync.add_argument("--" + field, required=True)
+    sync.add_argument("--comment-file", type=Path, required=True)
+    sync.add_argument("--follow-up-title")
+    sync.add_argument("--follow-up-file", type=Path)
+    sync.add_argument("--existing-follow-up", type=int, metavar="ISSUE",
+                      help="link a verified existing issue without editing it")
+    sync.add_argument("--impact", choices=("blocking", "nonblocking"), help="record the effect on parent acceptance")
+    sync.add_argument("--authorized", action="store_true", required=True,
+                      help="affirm the owner's grant to write incident records on this task")
+    args = parser.parse_args()
+    try:
+        if args.command == "markers":
+            result = markers(args.project, args.provider, args.task, args.step, args.symptom)
+        elif args.command == "github-sync":
+            result = github_sync(args)
+        elif args.command == "github-status":
+            result = github_status(args)
+        else:
+            result = locate(args.marker, json.load(sys.stdin))
+    except (ValueError, OSError, http.client.HTTPException) as exc:
+        parser.exit(1, f"{exc}\n")
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()
