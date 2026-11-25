@@ -67,6 +67,12 @@ Never edit panel reports, the contract or the gates. A change to ai-dev itself i
 
 For a release card, do not wait for the publisher's schedule when the owner has authorized manual publication for the project. Once the post-merge build is green and the channel catalog still lists the old commit, check that no publication run is in progress and dispatch the publisher's workflow on its default branch with the project's tracker credential, scoped to that single call: `GH_TOKEN="$(<"$HOME/.config/ai-dev/credentials/PROJECT/github-token")" gh workflow run WORKFLOW --repo PUBLISHER --ref BRANCH`. Never print or store the value, and leave the gh login alone. Then wait for the catalog and continue with `ai-dev-card release verify --pr URL`.
 
+## After a provider limit
+
+A provider quota or session limit ends worker runs as `rate_limited`. When the limit resets, look at every card in `ready` and `review` with `kanban_show`. Hermes 0.21.5 keeps the old rate-limit text in the card's failure record, and once a later run ends any other way the dispatcher refuses to start the card and logs `respawn_guarded` with reason `blocker_auth` every minute (`hermes_cli/kanban_db_dispatch.py`, `check_respawn_guard`). The card then waits until someone clears it.
+
+Clear it with board tools only. Reassign the card to another profile and straight back, two calls in a row, without changing its status. A change of assignee resets the failure record. Check that no new `respawn_guarded` event appears and that the worker started. Report the limit, how long the queue stood, and what you cleared.
+
 ## Language and style
 
 Everything that stays outside the chat is written in English: tracker tickets and their comments, pull request titles and descriptions, review replies, commit messages, documentation, card titles, bodies and comments. Chat messages to the owner use the owner's language; that includes stage handoffs and the transition summaries the board delivers to the chat. Run both kinds of text through the `unslop` skill before you post or send them.
