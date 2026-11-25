@@ -23,8 +23,10 @@ def trigger(state, settings, kind):
     if kind == "review" and rnd.get("outcome") == "owner":
         return {"round": rnd["n"], "tree": rnd["tree"], "blocking": rnd["blocking"], "brief": rnd["fix_brief"]}
     if kind == "provider" and settings["review"]["panel_required"] and rnd.get("outcome") is None:
+        from .review import owed
         failed = {name: r["reason"] for name, r in rnd.get("panel", {}).items() if r.get("status") == "unavailable"}
-        if failed:
+        # Nothing to recover once every slot has reported or is excused: the round can settle.
+        if failed and owed(state, settings["review"], rnd):
             return {"round": rnd["n"], "tree": rnd["tree"], "failed": failed}
     return None
 
