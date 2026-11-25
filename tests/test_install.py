@@ -67,6 +67,7 @@ class Install(unittest.TestCase):
         self.assertEqual((coder / "plugins/ai-dev-gate/role").read_text(), "coder\n")
         self.assertEqual((coder / "plugins/ai-dev-gate/prefix").read_text().strip(), str((self.root / "prefix").resolve()))
         self.assertTrue((coder / "skills/software-development/ai-dev-card/SKILL.md").is_file())
+        self.assertNotIn("ai-dev commands", (coder / "skills/software-development/unslop/SKILL.md").read_text())
         self.assertFalse((coder / "skills/software-development/ai-dev-planner").exists())
         planner = self.hermes / "skills/software-development"
         self.assertTrue((planner / "ai-dev-planner/SKILL.md").is_file())

@@ -21,7 +21,10 @@ SOURCE = Path(__file__).resolve().parent.parent
 MARKER, OWNER = ".ai-dev-managed", "ai-dev\n"
 ROLES = ("planner", "coder", "reviewer")
 TOOLS = ("ai-dev-card", "ai-dev", "ai-dev-discover", "ai-dev-analyze", "ai-dev-style-default", "ai-dev-incident", "ai-dev-tracker")
-SKILLS = {"planner": ("ai-dev-planner", "project-onboarding", "ai-dev-repair"), "coder": ("ai-dev-card",), "reviewer": ("ai-dev-card",)}
+SKILLS = {"planner": ("ai-dev-planner", "project-onboarding", "ai-dev-repair", "unslop"),
+          "coder": ("ai-dev-card", "unslop"), "reviewer": ("ai-dev-card", "unslop")}
+# Skills that run no ai-dev command get no launcher note.
+PLAIN = {"unslop"}
 LEGACY = ("plugins/ai-dev-journal", "skills/software-development/development-run",
           "skills/software-development/code-review")
 
@@ -106,7 +109,7 @@ def install_profile(home, role, prefix, bin_dir):
     for skill in SKILLS[role]:
         source = SOURCE / "hermes" / "skills" / skill
         replace_tree(source, home / "skills" / "software-development" / skill,
-                     extra={"SKILL.md": (source / "SKILL.md").read_text() + note})
+                     extra=None if skill in PLAIN else {"SKILL.md": (source / "SKILL.md").read_text() + note})
     return [skill for skill in SKILLS[role]]
 
 
