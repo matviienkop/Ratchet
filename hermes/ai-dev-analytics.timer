@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh and expire Ratchet analytics every fifteen minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=15min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

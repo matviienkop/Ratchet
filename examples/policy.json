@@ -1,8 +1,9 @@
 {
   "defaults": {
     "check_timeout": 900,
-    "max_defect_failures": 6,
-    "review": {"max_rounds": 3, "reviewer": "reviewer"}
+    "max_attempts": 5,
+    "max_defect_failures": 5,
+    "review": {"max_rounds": 5, "reviewer": "reviewer"}
   },
   "repos": {
     "git@github.com:example/backend.git": {

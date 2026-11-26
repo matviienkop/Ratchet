@@ -89,6 +89,7 @@ def inherit(card, source_card):
         state["inherited_from"] = provenance
         # Inherited obligations were accepted once already; from here they can only grow without the owner.
         state["frozen"] = True
+        state["attempt"] = source.get("attempt", 1) + 1
         record(state, "contract.inherited", source=provenance, findings=sorted(ledger))
         record(state, "contract.frozen", digest=verify.digest(contract))
     return {"source": provenance, "findings": sorted(ledger), "contract": contract,

@@ -23,3 +23,5 @@ sudo systemctl enable --now ai-dev-notifications.service
 ```
 
 Other deployments can run `ai-dev-card notifications --watch` beside the gateway with the same card store and planner credentials. For diagnostics run `ai-dev-card notifications` once, then check each handoff's delivery status in `history`.
+
+The [lifecycle analytics projection](analytics.md) joins these records with native runs and request usage for a future process analysis agent. Its ten-day retention is separate from the authoritative history described here.
