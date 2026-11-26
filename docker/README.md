@@ -85,6 +85,7 @@ Configuration comes from outside the image:
 
 - **Policy.** Mount it read-only at `/etc/ai-dev/policy.json`. A root-owned file there wins over the one in the volume, so a worker cannot relax it.
 - **Secrets.** Provide tokens for the code host and the chat gateway as files or environment variables. Subscription logins for model providers refresh their tokens and need a writable place, so they stay in the volume.
+- **Git identity.** Put one `user.name` and `user.email` into `/opt/data/.gitconfig` before the first card: the owner's, or the bot's own name. See `INSTALL.md` for the difference.
 - **Models.** Each profile's `config.yaml` is in the volume. Set the models once with `hermes -p NAME setup` or write the files before the first start.
 
 ## Kubernetes

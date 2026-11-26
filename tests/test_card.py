@@ -107,6 +107,24 @@ class CardCase(unittest.TestCase):
 
 
 class Verification(CardCase):
+    def test_review_waits_for_commits_under_the_configured_identity(self):
+        self.contract()
+        self.implement()
+        self.verified()
+        self.assertIsNone(self.decide("kanban_request_review", "coder"))
+        self.git("add", "-A")
+        self.git("-c", "user.name=Hermes Agent", "-c", "user.email=hermes@local", "commit", "-qm", "Add div")
+        refusal = self.decide("kanban_request_review", "coder")
+        self.assertIn("authored as Hermes Agent <hermes@local>", refusal)
+        self.assertIn("--reset-author", refusal)
+        self.git("commit", "-q", "--amend", "--no-edit", "--reset-author")
+        self.assertIsNone(self.decide("kanban_request_review", "coder"))
+        self.git("commit", "-q", "--amend", "-m", "Add div\n\nCo-authored-by: Hermes Agent <hermes@local>")
+        self.assertIn("has the trailer", self.decide("kanban_request_review", "coder"))
+        # A person who already has commits on the base branch may be credited.
+        self.git("commit", "-q", "--amend", "-m", "Add div\n\nCo-authored-by: T <t@example.invalid>")
+        self.assertIsNone(self.decide("kanban_request_review", "coder"))
+
     def test_passing_tree_gets_one_receipt_and_freezes_the_contract(self):
         self.contract()
         self.implement()

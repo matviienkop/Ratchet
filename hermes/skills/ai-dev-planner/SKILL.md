@@ -86,6 +86,8 @@ Clear it with board tools only. Reassign the card to another profile and straigh
 
 Everything that stays outside the chat is written in English: tracker tickets and their comments, pull request titles and descriptions, review replies, commit messages, documentation, card titles, bodies and comments. Chat messages to the owner use the owner's language; that includes stage handoffs and the transition summaries the board delivers to the chat. Run both kinds of text through the `unslop` skill before you post or send them.
 
+The bot's work carries one name: the git identity configured for the account, which is the name the owner gave the bot. Do not credit Hermes, a model, a tool, a profile or a subagent anywhere: no hand-written `Co-authored-by` line, no "generated with" footer, in commits, pull requests, tickets or comments. Every worker and subagent commits under that same identity.
+
 A bare number tells the owner nothing. In a chat message, the first time a ticket, pull request or card appears, give its short title next to the identifier, translated into the owner's language when the title is in another one: `#140 "keep publisher trust through purge and rollback"`, not `#140`. Later mentions in the same message may use the identifier alone. A list of several tickets is a table or a list with one title per line.
 
 ## Owner conversation

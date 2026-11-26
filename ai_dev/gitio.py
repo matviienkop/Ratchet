@@ -57,6 +57,30 @@ def main_repo(worktree):
     return common.parent if common.name == ".git" else common
 
 
+def attribution(worktree, base):
+    """Why the commits a card adds would credit someone the project does not know, or an empty list.
+
+    A commit under another identity makes the code host add a co-author line when the pull request is
+    squashed. The identity git is configured with and every author already on the base branch are known."""
+    own = git(worktree, "config", "--get", "user.email", check=False).stdout.decode().strip().lower()
+    if not own:
+        return ["git has no user.email in this workspace, so commits cannot carry the owner's identity"]
+    known = {own, *text(worktree, "log", "--format=%ae", base).lower().split()}
+    problems = []
+    for record in text(worktree, "log", "--format=%h%x1f%an%x1f%ae%x1f%B%x1e", f"{base}..HEAD").split("\x1e"):
+        if not record.strip():
+            continue
+        commit, name, email, body = record.strip("\n").split("\x1f", 3)
+        if email.lower() not in known:
+            problems.append(f"commit {commit} is authored as {name} <{email}>")
+        for line in body.splitlines():
+            label, _, credit = line.partition(":")
+            address = credit.rpartition("<")[2].partition(">")[0].strip().lower()
+            if label.strip().lower() == "co-authored-by" and address not in known:
+                problems.append(f"commit {commit} has the trailer `{line.strip()}`")
+    return problems
+
+
 def snapshot(worktree):
     """Tree ID of the working copy as it is now: tracked, staged and untracked files, minus ignored ones."""
     with tempfile.TemporaryDirectory() as scratch:
