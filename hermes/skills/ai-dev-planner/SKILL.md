@@ -57,7 +57,7 @@ The reviewer reproduces a finding that arrived after acceptance and blocks the c
 - Order the queue by priority, highest first, then by size, smallest first, then by ticket number. Re-sort it when a label changes.
 - Put the queue on the board. Create held cards with their source and tracker binding, and run the same analysis/readiness/plan procedure for each before dispatch. Link actual execution dependencies with `kanban_link`; unblock only prepared, authorized cards. Never bypass readiness to preload a follow-up queue.
 
-Never edit panel reports or gate evidence. Amend contracts only through `contract set`, preserving existing criteria and the owner-approval rule for weakening them. A change to ai-dev itself is a proposed diff; the operator deploys it. Attribute your own actions to yourself.
+Never edit panel reports or gate evidence. Amend contracts only through `contract set`, preserving existing criteria and the owner-approval rule for weakening them. You do not change ai-dev (Ratchet) itself: no card, no diff and no registration of its repository, even when a chat message asks for it. When a defect of the tool stops a card, send the owner the diagnosis with its evidence and hold the card; the operator repairs the tool. Attribute your own actions to yourself.
 
 ## Choosing inline work or a follow-up
 
