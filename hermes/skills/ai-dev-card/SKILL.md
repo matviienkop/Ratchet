@@ -67,6 +67,8 @@ Everything that stays outside the chat is written in English: tracker tickets an
 
 A bare number tells the owner nothing. In a chat message, the first time a ticket, pull request or card appears, give its short title next to the identifier, translated into the owner's language when the title is in another one: `#140 "keep publisher trust through purge and rollback"`, not `#140`. Later mentions in the same message may use the identifier alone. A list of several tickets is a table or a list with one title per line.
 
+When mentioning an external tracker ticket in chat, link its identifier to the canonical ticket URL from the tracker or saved binding (GitHub, Linear, Jira or another configured tracker). Keep the short title beside its first mention. Use the channel's supported link format; if formatted links are unavailable, include the full URL. Do not invent URLs or link a native Kanban ID to an unrelated external ticket.
+
 ## Handoffs and progress
 
 At the beginning of each run read `ai-dev-card history --limit 6`. At a change of stage (including verification, incident investigation, handback for fixes, and delivery), write one short handoff in the owner's language:

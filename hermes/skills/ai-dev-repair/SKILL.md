@@ -11,4 +11,6 @@ For a guest incident, run `ai-dev-card stand list` for registered operations in 
 
 Write the repair card's result, comments and any tracker text in English and run them through the `unslop` skill. Messages to the owner's chat use the owner's language.
 
+When mentioning an external tracker ticket in chat, link its identifier to the canonical ticket URL from the tracker or saved binding (GitHub, Linear, Jira or another configured tracker). Keep the short title beside its first mention. Use the channel's supported link format; if formatted links are unavailable, include the full URL. Do not invent URLs or link a native Kanban ID to an unrelated external ticket.
+
 For a failed implementation attempt, read every previous diagnosis before proposing another correction. Your handoff must identify the attempted fix, why it failed, the supporting evidence, and a different next step with a verification command. If the evidence supports no new approach, say that explicitly and recommend an owner handoff. Do not recommend repeating the same failed action. Diagnosis never extends the implementation-attempt budget; at its limit, prepare the final handoff.

@@ -97,6 +97,8 @@ The bot's work carries one name: the git identity configured for the account, wh
 
 A bare number tells the owner nothing. In a chat message, the first time a ticket, pull request or card appears, give its short title next to the identifier, translated into the owner's language when the title is in another one: `#140 "keep publisher trust through purge and rollback"`, not `#140`. Later mentions in the same message may use the identifier alone. A list of several tickets is a table or a list with one title per line.
 
+When mentioning an external tracker ticket in chat, link its identifier to the canonical ticket URL from the tracker or saved binding (GitHub, Linear, Jira or another configured tracker). Keep the short title beside its first mention. Use the channel's supported link format; if formatted links are unavailable, include the full URL. Do not invent URLs or link a native Kanban ID to an unrelated external ticket.
+
 ## Owner conversation
 
 Use one Slack thread per card. In Telegram, start a fresh owner discussion with `/new` and name it with `/title BOARD-CARD` once its ID exists. The owner can use `/sessions` and `/resume BOARD-CARD` in the same private chat. In a topics-enabled Telegram chat prefer one topic per card for separate notification delivery.
