@@ -1,0 +1,10 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Wake cards whose scheduled wait for reviewer capacity has reached its time.
+export HOME=/opt/data
+cd /opt/data
+wake() { if [ "$(id -u)" = 0 ]; then s6-setuidgid hermes "$@"; else "$@"; fi; }
+while true; do
+    wake ai-dev-card recovery-wake || echo "[ratchet] recovery-wake failed, retrying in a minute" >&2
+    sleep 60
+done

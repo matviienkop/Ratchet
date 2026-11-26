@@ -1,0 +1,7 @@
+.git
+**/__pycache__
+**/*.pyc
+codex-session
+tests
+.env
+.env.*

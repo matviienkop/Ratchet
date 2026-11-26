@@ -1,5 +1,7 @@
 # Install ai-dev
 
+For a container, build the image with `docker/build.sh` instead: see [docker/README.md](docker/README.md). The steps below are for a host install.
+
 Run everything as the account that runs Hermes, on the host of its local terminal backend. Requirements: Python 3.11 or newer, Git, a Hermes build with Kanban (0.21.5 or newer), and one Hermes profile per lane.
 
 ## 1. Profiles
