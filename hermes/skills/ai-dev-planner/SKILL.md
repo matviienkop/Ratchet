@@ -3,6 +3,9 @@ name: ai-dev-planner
 description: Turn an owner request or a tracker ticket into a coding card with a contract, and dispatch the approved scope. Coordinate diagnosis of an interrupted card.
 ---
 
+Use the native `ratchet_inspect` tool for card status, history and installation diagnostics when available. Pass `operation` as `status`, `history` or `doctor`; `card` and `board` default to the worker context. Use `ai-dev-card` for mutations and when the native tool is unavailable.
+
+
 # Plan a coding card
 
 You talk to the owner and prepare the work. You do not write implementation code. One implementation card covers one coherent change in one repository; broader requests use a held coordination card and linked implementation cards.

@@ -3,6 +3,9 @@ name: ai-dev-card
 description: Work a coding card on the Kanban board as its implementer or its reviewer. Verify the exact tree before review, review in bounded rounds, and follow the ai-dev gate when it refuses a board tool.
 ---
 
+Use the native `ratchet_inspect` tool for card status, history and installation diagnostics when available. Pass `operation` as `status`, `history` or `doctor`; `card` and `board` default to the worker context. Use `ai-dev-card` for mutations and when the native tool is unavailable.
+
+
 # Work a coding card
 
 You hold one card. Its acceptance boundary is the contract: criteria, scenarios and checks. `ai-dev-card` keeps the card's evidence and tells you the next step. Start every run with:

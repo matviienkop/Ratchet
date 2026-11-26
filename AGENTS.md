@@ -14,8 +14,8 @@ ai-dev is a thin layer on Hermes Kanban: a verification runner, a review protoco
 
 ## Rules for changes
 
-- The package uses the Python standard library only.
-- Nothing imports Hermes modules. The supported Hermes surface is the pre/post tool hooks, worker and chat environment variables, native Kanban CLI and board tools. Verify any new dependency on Hermes against its source and name the file in the docs.
+- Ratchet is a Hermes extension. Reuse Hermes capabilities instead of maintaining local equivalents. Prefer the public plugin API. Isolate required internal imports in integration modules and cover them with compatibility tests against the supported Hermes version. Patch Hermes source only when no suitable API exists.
+- Verify each Hermes dependency against the deployed source and name the file in the docs. Standalone portability is not a requirement.
 - Policy belongs in code and the policy file. Skills describe a role and the commands to run; they are not the place for case-specific patches.
 - A gate decision must be testable without a model. Add the test in `tests/test_card.py`.
 - Every refusal message names the command the worker should run next.

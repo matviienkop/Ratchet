@@ -31,6 +31,10 @@ spec.loader.exec_module(fallback)
 class Context:
     def __init__(self):
         self.hooks = {}
+        self.tools = {}
+
+    def register_tool(self, **entry):
+        self.tools[entry["name"]] = entry
 
     def register_hook(self, name, callback):
         self.hooks[name] = callback
@@ -150,6 +154,7 @@ class Install(unittest.TestCase):
         self.run_install()
         module, context = self.plugin("coder"), Context()
         module.register(context)
+        self.assertIn("ratchet_inspect", context.tools)
         self.assertEqual(os.environ["AI_DEV_ROLE"], "coder")
         check = context.hooks["pre_tool_call"]
         self.assertIsNone(check(tool_name="kanban_complete", args={}, task_id=""))
@@ -168,6 +173,36 @@ class Install(unittest.TestCase):
         self.assertEqual(refused["action"], "block")
         self.assertIn("through review", refused["message"])
         self.assertEqual(check(tool_name="kanban_request_review", args={})["action"], "block")
+
+    def test_native_inspection_matches_cli_and_preserves_worker_context(self):
+        self.run_install()
+        module, context = self.plugin("coder"), Context()
+        module.register(context)
+        os.environ.update(AI_DEV_HOME=str(self.root / "state"), HERMES_KANBAN_TASK="t_native",
+                          HERMES_KANBAN_BOARD="test", HERMES_KANBAN_WORKSPACE=str(self.root))
+        handler = context.tools["ratchet_inspect"]["handler"]
+        for operation in ("status", "history", "doctor"):
+            expected = subprocess.run([str(self.root / "bin/ai-dev-card"), operation],
+                                      capture_output=True, text=True)
+            actual = json.loads(handler({"operation": operation}))
+            self.assertEqual(actual["exit_code"], expected.returncode)
+            self.assertEqual(actual["result"], sanitize(json.loads(expected.stdout)))
+        status = json.loads(handler({"operation": "status"}))["result"]
+        self.assertEqual((status["card"], status["board"], status["role"]), ("t_native", "test", "coder"))
+        other = json.loads(handler({"operation": "status", "card": "t_other", "board": "other"}))["result"]
+        self.assertEqual((other["card"], other["board"]), ("t_other", "other"))
+
+    def test_native_inspection_rejects_commands_and_returns_cli_errors(self):
+        from ai_dev.hermes_tools import inspect_card
+        with patch("ai_dev.hermes_tools.subprocess.run") as run:
+            for args in ({"operation": "verify"}, {"operation": "status", "card": "--help"},
+                         {"operation": "history", "limit": True}, {"operation": "history", "limit": 101}):
+                self.assertIn("error", json.loads(inspect_card(args)))
+            run.assert_not_called()
+        os.environ["AI_DEV_HOME"] = str(self.root / "state")
+        result = json.loads(inspect_card({"operation": "status", "card": "invalid;card"}))
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertIn("Invalid card", result["error"])
 
     def test_a_broken_install_fails_closed(self):
         self.run_install()

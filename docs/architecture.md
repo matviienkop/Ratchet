@@ -35,7 +35,7 @@ ai_dev/stands.py    trusted stand drivers
 ai_dev/cli.py       the ai-dev-card command
 ```
 
-The Hermes surface the code depends on is small and documented: `ctx.register_hook("pre_tool_call", ...)`, its `{"action": "block", "message": ...}` return, the worker variables `HERMES_KANBAN_TASK`, `HERMES_KANBAN_BOARD`, `HERMES_KANBAN_WORKSPACE`, and the names of three board tools. Nothing imports Hermes modules.
+The Hermes surface the code depends on is small and documented: `ctx.register_hook("pre_tool_call", ...)`, its `{"action": "block", "message": ...}` return, the worker variables `HERMES_KANBAN_TASK`, `HERMES_KANBAN_BOARD`, `HERMES_KANBAN_WORKSPACE`, and the names of three board tools. Ratchet is a Hermes extension; independent operation is not an architectural requirement. Prefer the public plugin API and isolate necessary internal imports with version compatibility tests.
 
 ## Card state
 
@@ -100,3 +100,9 @@ Hosted findings have an explicit import/disposition command, but no automatic co
 ## Shared correction budget
 
 Five implementation attempts, including the first, are shared across verification, review and late findings. Every failed attempt requires an independently completed native diagnosis before the next correction. Recovery never extends this budget. At exhaustion the final diagnosis supports one owner handoff; only an explicit owner extension permits further attempts. Native Hermes owns diagnostic scheduling and dependency wakeup.
+
+### Native card inspection
+
+The gate plugin registers `ratchet_inspect` in the `ratchet` toolset using `PluginContext.register_tool` from `hermes_cli/plugins.py` in the installed Hermes source. Its handler uses the running Hermes Python interpreter to execute the existing card CLI in a separate process. The process inherits the worker role, board, card and workspace, and returns a redacted result with the original exit code. It accepts no shell command or arbitrary executable. This first migration covers status, history and installation diagnostics; mutations still use the existing CLI.
+
+The installer still places skills in profile directories so their existing discovery and names remain available. Migrating bundled skills, secret redaction and provider routing requires separate compatibility checks. `register_skill` and API error classification hooks are not drop-in replacements for all current behavior.
