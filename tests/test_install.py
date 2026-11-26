@@ -186,6 +186,8 @@ class Install(unittest.TestCase):
                                       capture_output=True, text=True)
             actual = json.loads(handler({"operation": operation}))
             self.assertEqual(actual["exit_code"], expected.returncode)
+            if expected.returncode == 0:
+                self.assertNotIn("error", actual)
             self.assertEqual(actual["result"], sanitize(json.loads(expected.stdout)))
         status = json.loads(handler({"operation": "status"}))["result"]
         self.assertEqual((status["card"], status["board"], status["role"]), ("t_native", "test", "coder"))
