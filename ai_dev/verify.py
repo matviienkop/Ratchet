@@ -211,6 +211,14 @@ def verify(card, worktree, stage="pre_review", rerun=False):
         raise CardError(f"Unknown stage {stage}.")
     with card.locked() as state:
         worktree, settings, tree = prepare(state, worktree)
+        from . import intake
+        problem = intake.issue(state, settings, worktree)
+        if problem:
+            raise CardError(problem)
+        from .preflight import issue
+        problem = issue(state, settings)
+        if problem:
+            raise CardError(problem)
         contract = state["contract"]
         checks = checks_for(settings, contract, stage)
         if not checks:
@@ -221,14 +229,13 @@ def verify(card, worktree, stage="pre_review", rerun=False):
         if not state["frozen"]:
             state["frozen"] = True
             record(state, "contract.frozen", digest=digest(contract))
+        from .recovery import require_diagnosis
+        require_diagnosis(state, settings)
         previous = passing_receipt(state, settings, tree, stage)
         if previous and not rerun:
             return previous, 0
-        limit = settings["max_defect_failures"] + state["extra_failures"]
-        if state["counters"]["defect"] >= limit:
-            raise CardError(
-                f"The verification budget is spent: {state['counters']['defect']} failed attempts, limit {limit}. "
-                "Run ai-dev-card recover verification to dispatch the incident or retrieve its decision.", code=3)
+        started = time.monotonic()
+        started_at = now()
         number = len(state["verifications"]) + 1
         commit = gitio.anchor(worktree, f"{card.board}/{card.id}/v{number}", tree, state["base"])
         folder = card.evidence(f"verify-{number}")
@@ -275,7 +282,8 @@ def verify(card, worktree, stage="pre_review", rerun=False):
             result = "defect"
         else:
             result = "environment"
-        receipt = {"id": number, "at": now(), "stage": stage, "tree": tree, "commit": commit, "base": state["base"],
+        receipt = {"id": number, "at": now(), "started": started_at,
+                   "duration_seconds": time.monotonic() - started, "stage": stage, "tree": tree, "commit": commit, "base": state["base"],
                    "patch_sha256": hashlib.sha256(patch).hexdigest(), "checks": results,
                    "checks_digest": checks_digest(checks), "passed": result == "passed", "result": result,
                    "problem": ("The working tree changed while checks ran: " + ", ".join(touched[:8]) + ". If a check "

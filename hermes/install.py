@@ -8,6 +8,7 @@ Run it again after every update. It needs no sudo and changes no Hermes configur
 """
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,7 @@ SOURCE = Path(__file__).resolve().parent.parent
 MARKER, OWNER = ".ai-dev-managed", "ai-dev\n"
 ROLES = ("planner", "coder", "reviewer")
 TOOLS = ("ai-dev-card", "ai-dev", "ai-dev-discover", "ai-dev-analyze", "ai-dev-style-default", "ai-dev-incident", "ai-dev-tracker")
-SKILLS = {"planner": ("ai-dev-planner", "project-onboarding", "ai-dev-repair", "unslop"),
+SKILLS = {"planner": ("ai-dev-planner", "project-onboarding", "ai-dev-repair", "ai-dev-research", "unslop"),
           "coder": ("ai-dev-card", "unslop"), "reviewer": ("ai-dev-card", "unslop")}
 # Skills that run no ai-dev command get no launcher note.
 PLAIN = {"unslop"}
@@ -80,8 +81,14 @@ def replace_tree(source, destination, extra=None):
 
 def install_programs(prefix, bin_dir, workspace=None):
     prefix.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    root = SOURCE / "hermes"
+    for path in sorted([*root.glob("skills/**/*"), *root.glob("plugin/**/*.py")]):
+        if path.is_file() and "__pycache__" not in path.parts:
+            digest.update(str(path.relative_to(root)).encode() + b"\0" + path.read_bytes())
     for name in ("ai_dev", "bin", "stands"):
-        replace_tree(SOURCE / name, prefix / name)
+        extra = {"workflow.sha256": digest.hexdigest() + "\n"} if name == "ai_dev" else None
+        replace_tree(SOURCE / name, prefix / name, extra=extra)
     bin_dir.mkdir(parents=True, exist_ok=True)
     # The onboarding tools keep registered projects under one workspace root.
     default = f": \"${{AI_DEV_WORKSPACE:={shlex.quote(str(workspace))}}}\"\nexport AI_DEV_WORKSPACE\n" if workspace else ""

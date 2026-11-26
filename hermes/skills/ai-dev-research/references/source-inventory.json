@@ -1,0 +1,23 @@
+{
+  "project": "PROJECT",
+  "sources": [
+    {
+      "name": "project_confluence",
+      "kind": "confluence",
+      "transport": "hermes-mcp",
+      "scope": {
+        "environment": "development",
+        "cloud_id": "CONFIGURE",
+        "space": "CONFIGURE"
+      },
+      "auth_reference": "Hermes profile OAuth store; no credential value",
+      "limits": {
+        "timeout_seconds": 30,
+        "max_results": 20
+      },
+      "status": "not_configured",
+      "verified_at": null,
+      "verification_reference": null
+    }
+  ]
+}

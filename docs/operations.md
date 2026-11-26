@@ -13,12 +13,13 @@ Installation is in [INSTALL.md](../INSTALL.md). This page covers the policy file
 | `checks` | none | List of `{name, argv, timeout, stage, stand}`. `stage` is `pre_review` (default) or `post_review`. |
 | `check_timeout` | 900 | Seconds per check without its own `timeout`. |
 | `base_probe` | true | Rerun a failing check on the base to tell a defect from a pre-existing failure. |
-| `max_defect_failures` | 6 | Failed verifications a card may spend before the owner is asked. |
+| `max_attempts` | 5 | Total implementation attempts, including the initial attempt. Verification failures, review changes and late returns share this budget. |
+| `max_defect_failures` | 5 | Legacy ceiling, retained as an additional ceiling on the shared attempt limit. |
 | `target_branch` | detected | Branch the base is computed against. Set it when `origin/HEAD` is missing. |
 | `project` | none | Stand registration name: drivers live in `/etc/ai-dev/stands/<project>/`. |
 | `delivery` | `local` | `pr` tells the coder to push and open a pull request after verification. |
 | `pr_ci` | none | For PR-only delivery, `{repository, branch, ci_workflow}` pins the GitHub repository, target branch and Actions workflow checked by `release check-pr`. |
-| `review.max_rounds` | 3 | Review rounds before the owner decides. |
+| `review.max_rounds` | 5 | Legacy ceiling, retained as an additional ceiling on the shared attempt limit. |
 | `review.reviewer` | `reviewer` | Profile the coder hands the card to. |
 | `review.panel` | OpenAI Astra through Hermes and Anthropic Opus through Claude Code | Two subprocess reviewers. Each entry supplies name, argv, output type, model and optional focus. |
 | `review.panel_required` | true | Wait for every panel reviewer before settling. |
@@ -133,7 +134,11 @@ The receipt contains the PR, head and merge SHAs, release URL, package versions,
 
 ### Bounded autonomous recovery
 
-For exhausted verification attempts, a capped review with open blockers, or an unavailable required provider, the worker runs `ai-dev-card recover verification|review|provider`. The command produces one stable native repair request. The parent links that scratch diagnosis as a dependency. When the child finishes, `recover KIND --resolved CHILD_ID` checks the native board, parent link, task identity, diagnosis marker and completion summary. The journal records the child and decision. Verification and review budgets receive one additional attempt each, and only a missing reviewer can rerun in its existing round. A successful check, resolved old findings, or a confirmed report from the previously failed reviewer distinguishes a new incident from retries of the same one. An unresolved mandatory gate after diagnosis and the corrective pass leads to a PR and evidence handoff. Credentials, merge scope, acceptance criteria and independent-review requirements retain their own authorization boundaries.
+After every failed implementation attempt, including the first and the final one, run `ai-dev-card recover verification|review`. Before another correction, a separate scratch diagnosis must inspect the failed checks or findings, previous diagnoses and attempted fixes, then return evidence and a concrete next step. Create or reuse its stable native repair request and link it as a prerequisite. `recover KIND --resolved CHILD_ID` verifies its native identity, dependency, completion and marker. Repeated calls reuse the diagnosis and never consume another attempt.
+
+The default shared budget is five attempts total, including the initial implementation. The effective limit is the minimum of `max_attempts`, `max_defect_failures` and `review.max_rounds`; set all three to five when upgrading an older policy. Only an explicit owner `review extend --rounds N --owner-ref MESSAGE` or `--failures N` adds attempts. Diagnosis does not add budget. The final diagnosis produces a handoff and the worker calls `kanban_block(kind='needs_input')`; it must not merge, schedule another correction or repeatedly notify the owner. A new finding, reviewer or session does not reset the card budget. Provider outages use `recover provider` and their existing bounded waiting policy; they do not spend implementation attempts.
+
+An independent diagnosis can establish that no supported correction is available. In that case block for the owner immediately instead of spending the next authorization on an unchanged approach. Credentials, merge scope, acceptance criteria and independent-review requirements retain their own authorization boundaries.
 
 For a recognizable quota or temporary transport outage, `recover provider` first returns bounded delays (15 minutes, one hour, four hours). Its native `kanban_schedule` reason identifies that particular wait. No model runs while parked. Install `hermes/ai-dev-recovery.service` and `hermes/ai-dev-recovery.timer` in `/etc/systemd/system/`, then `systemctl daemon-reload` and `systemctl enable --now ai-dev-recovery.timer`. Other platforms can call `ai-dev-card recovery-wake` once per minute as the planner. The wake command checks the board's scheduled event and exact reason, skips other states and owner pauses, then uses native `kanban unblock`. After the delayed retries, investigate remaining unavailability via the bounded repair path.
 
@@ -154,4 +159,12 @@ Manual proof contains `tree`, `scenario`, `result: "pass"` and nonempty `observe
 
 On an active legacy card, add evidence links with `contract set`. Adding fields to an otherwise unchanged scenario does not weaken the frozen contract. Do not invent passing evidence for historical cards. Completed cards are not migrated or reopened by installation. Projects can set `require_scenario_evidence: false` during an explicit migration; malformed references remain errors.
 
-When the owner chooses a fresh implementation card, run `ai-dev-card contract inherit --from-card ID --from-board BOARD` on the fresh destination. It copies the contract and obligations with provenance, copies stored reproductions, and reruns them on the first new review candidate. It does not carry over acceptance, owner waivers, CI or manual proof. The source card stays unchanged. Inheritance refuses to overwrite an existing destination contract. The inherited contract is frozen from the start: `contract set` can add criteria, scenarios, checks and evidence links, and removing or changing an inherited one needs `--owner-ref`.
+When the owner chooses a fresh implementation card, run `ai-dev-card contract inherit --from-card ID --from-board BOARD` on the fresh destination. It copies the contract and obligations with provenance, copies stored reproductions, and reruns them on the first new review candidate. It does not carry over acceptance, owner waivers, CI or manual proof. The source card stays unchanged. Inheritance refuses to overwrite an existing destination contract. The rewrite consumes the next shared implementation attempt; an exhausted source needs an owner extension before verification. Diagnosis permissions are not copied. The inherited contract is frozen from the start: `contract set` can add criteria, scenarios, checks and evidence links, and removing or changing an inherited one needs `--owner-ref`.
+
+## Before implementation
+
+Configure and run [project preflight](preflight.md) to establish environment readiness and baseline test discovery before source edits. Its receipts and failure assessments are separate from candidate acceptance and do not consume correction attempts.
+
+## Before implementation planning
+
+Use [task analysis](task-analysis.md) for tickets and requests received directly in chat. Enable `require_task_analysis: true` in defaults or repository policy to require ready analysis and a current implementation plan at verification and board handoff. Configure source access per project; no database or observability connector is assumed to exist.

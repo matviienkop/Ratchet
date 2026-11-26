@@ -8,9 +8,10 @@ import shutil
 import sys
 
 from . import __version__, gate, gitio, policy as policies, release, review, severity, stands, verify
-from . import recovery, recovery_wake, findings, continuity
+from . import intake, preflight, recovery, recovery_wake, findings, continuity
 from .stand_cli import add_command as add_stand_command
 from .history import add_commands as add_history_commands
+from .analytics import add_command as add_analytics_command
 from .store import Card, CardError, home, identity
 
 
@@ -34,6 +35,7 @@ def status(args):
         workspace = gitio.repo_root(_workspace(args))
         tree = gitio.snapshot(workspace)
         settings = policies.load(repo=gitio.main_repo(workspace), origin=gitio.origin(workspace))
+        result["preflight_configured"] = settings.get("preflight") is not None
         result["reviewer"] = settings["review"]["reviewer"]
         result["delivery"] = settings["delivery"]
         rule = release.selected(state.get("contract"), settings)
@@ -69,7 +71,7 @@ def status(args):
     else:
         step = "Implement the contract, then run `ai-dev-card verify`."
     if settings:
-        for boundary in ("provider", "review", "verification"):
+        for boundary in ("provider",):
             if recovery.trigger(state, settings, boundary):
                 incident = state.get("recoveries", {}).get(boundary, {})
                 if boundary == "review" and incident.get("child") and incident["facts"]["round"] == rnd["n"]:
@@ -79,6 +81,17 @@ def status(args):
                 elif boundary != "verification" or not verified:
                     step = f"Run ai-dev-card recover {boundary}. Resume with the linked child ID when it is done."
                 break
+    if settings:
+        result["attempt"] = state.get("attempt", 1)
+        result["max_attempts"] = recovery.attempt_limit(state, settings)
+        for kind in ("verification", "review"):
+            issue = recovery.correction_issue(state, settings, kind)
+            if issue:
+                step = issue
+                break
+    if settings and state["contract"]:
+        result["preflight"] = state.get("preflight")
+        step = intake.issue(state, settings, workspace) or preflight.issue(state, settings) or step
     result["next"] = step
     return result, 0
 
@@ -104,7 +117,7 @@ def contract(args):
 def run_verify(args):
     receipt, code = verify.verify(_card(args), _workspace(args), stage=args.stage, rerun=args.rerun)
     hint = {0: "Passed. Call kanban_request_review." if args.stage == "pre_review" else "Passed. Run ai-dev-card review settle for the delivery step.",
-            1: "A check failed on your change. Read the log, fix the code and verify again.",
+            1: "A check failed on your change. Run ai-dev-card recover verification and complete the diagnosis before retrying.",
             2: "The checks could not judge the change (environment, or a failure that the base has too). "
                "Follow the recovery section of the ai-dev-card skill with the receipt and repair_requests."}[code]
     return {**receipt, "next": hint}, code
@@ -187,7 +200,16 @@ def main(argv=None):
     parser.add_argument("--board", help="Board slug. Defaults to HERMES_KANBAN_BOARD, then `default`.")
     parser.add_argument("--workspace", help="Working tree. Defaults to HERMES_KANBAN_WORKSPACE, then the current directory.")
     commands = parser.add_subparsers(dest="command", required=True)
+    pre = commands.add_parser("preflight", help="Check the project validation environment on the base revision.")
+    pre.add_argument("action", nargs="?", choices=("run", "show", "acknowledge"), default="run")
+    pre.add_argument("--rerun", action="store_true")
+    pre.add_argument("--check")
+    pre.add_argument("--reason")
+    pre.add_argument("--evidence")
+    pre.set_defaults(run=lambda args: preflight.command(args, _card(args), _workspace(args)))
+    intake.add_commands(commands, _card)
     add_history_commands(commands, _card)
+    add_analytics_command(commands, _card)
     add_stand_command(commands, _card, _workspace)
     commands.add_parser("recovery-wake", help="Wake due provider-capacity waits.").set_defaults(run=lambda _: recovery_wake.tick())
     sub = commands.add_parser("recover", help="Dispatch one diagnosis and resume the failed acceptance step.")

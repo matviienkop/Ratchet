@@ -123,3 +123,17 @@ Container deployments can run `ai-dev-card notifications --watch` with the owner
 Verify the account's model catalog and test a short turn for each peer. Install the official `claude-subscription-directsdk` provider into each participating Hermes profile. Keep Claude Code authenticated as the service user. On the dedicated, pinned Hermes checkout run `hermes/enable-subscription-fallback.sh /path/to/hermes-agent` as that user. This replaces the fallback list for default, coder and reviewer. It retains the primary models and effort. The planner, the coder and the review coordinator all use Opus 5.5 as their peer, so a turn that moves to the other provider keeps a model of the same class. These are role assignments, not measured equivalence.
 
 This optional integration applies a checksum-checked guard to the native fallback handler. The chain is used in two cases: the provider is unavailable (quota, rate limit, overload, server error, timeout, missing model, authentication), or its safety filter refused the request. A refused request goes to the peer unchanged; it is never reworded to pass the same filter. Any other failure stays with the primary model. The guard covers refusals that arrive as an API error; a refusal the model returns as an ordinary completion still ends the turn. A review panel slot follows the same rule: a refusal moves the slot to its approved peer on another provider, and with no peer left the round may settle with a single reviewer. Configure gateway systemd `ExecStartPre=/usr/bin/python3 /path/to/ai-dev/hermes/availability-fallback.py /path/to/hermes-agent` to check the guard at startup. Requalify the handler when upgrading Hermes before enabling fallback on another revision. Card workers record API route attempts and classified failures from the Hermes API request hooks. The review panel has separate reservations and runtime model checks.
+
+## Lifecycle analysis datasets
+
+Install the collector timer under the same account and shared card home as the gateway. Adjust the supplied unit's account, environment and launcher path for a custom deployment.
+
+```sh
+install -m 0644 hermes/ai-dev-analytics.service hermes/ai-dev-analytics.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now ai-dev-analytics.timer
+systemctl start ai-dev-analytics.service
+journalctl -u ai-dev-analytics.service -n 20
+```
+
+For containers, schedule `ai-dev-card analytics collect` every fifteen minutes and once after startup. The [dataset reference](docs/analytics.md) describes the ten-day window, fields, coverage limits and the boundary with retained operational evidence. No analysis agent is enabled by this installation.

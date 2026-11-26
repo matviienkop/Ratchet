@@ -63,7 +63,7 @@ Kanban stays the source of truth for the card's status, assignee and history. `c
 | `passed` (exit 0) | every check passed and the tree did not change meanwhile | no |
 | `defect` (exit 1) | a check failed and passes on the base | yes |
 | `environment` (exit 2) | a command could not start, timed out, the tree changed while checks ran, or the failing check fails on the base too | no |
-| refused (exit 3) | the budget of defect failures is spent (default 6) | |
+| refused (exit 3) | a diagnosis is required or the shared five-attempt budget is exhausted | |
 
 A receipt is bound to the tree and to the set of checks that ran. A check added later, in the policy or the contract, voids older receipts for that stage. A check that leaves untracked files in the workspace changes the tree; the receipt then names the files, and the fix is `.gitignore` or a check that cleans up.
 
@@ -96,3 +96,7 @@ A refusal carries the command to run next. An error inside the gate blocks the c
 ## Remaining integration work
 
 Hosted findings have an explicit import/disposition command, but no automatic comment collector. Package release receipts are implemented; installed-product behavior checks remain project-specific. Watched Slack-channel triage, complete token accounting, and a full live qualification of all tracker adapters remain separate work. Keep publication, installation and product-behavior evidence distinct.
+
+## Shared correction budget
+
+Five implementation attempts, including the first, are shared across verification, review and late findings. Every failed attempt requires an independently completed native diagnosis before the next correction. Recovery never extends this budget. At exhaustion the final diagnosis supports one owner handoff; only an explicit owner extension permits further attempts. Native Hermes owns diagnostic scheduling and dependency wakeup.

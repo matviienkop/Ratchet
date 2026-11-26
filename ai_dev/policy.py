@@ -33,12 +33,15 @@ DEFAULTS = {
     "checks": [],
     "check_timeout": 900,
     "base_probe": True,
-    "max_defect_failures": 6,
+    "preflight": None,
+    "require_task_analysis": False,
+    "max_defect_failures": 5,
+    "max_attempts": 5,
     "delivery": "local",
     "release": None,
     "pr_ci": None,
     "require_scenario_evidence": True,
-    "review": {"max_rounds": 3, "author_model": None, "primary_model": None, "reviewer": "reviewer", "panel": [OPENAI_PANEL, CLAUDE_PANEL], "panel_required": True,
+    "review": {"max_rounds": 5, "author_model": None, "primary_model": None, "reviewer": "reviewer", "panel": [OPENAI_PANEL, CLAUDE_PANEL], "panel_required": True,
                "panel_timeout": 1200, "max_prompt_bytes": 400_000, "confirm_timeout": 600},
 }
 
@@ -105,8 +108,12 @@ def load(repo=None, origin=None):
         release.validate(result["release"])
     if result["pr_ci"] is not None:
         release.validate_pr_ci(result["pr_ci"])
+    if type(result["require_task_analysis"]) is not bool:
+        raise CardError("Set require_task_analysis to true or false in project policy; run ai-dev-card doctor.")
     if type(result["require_scenario_evidence"]) is not bool:
         raise CardError("Set require_scenario_evidence to true or false in the policy, then run ai-dev-card doctor.")
+    from .preflight import validate as validate_preflight
+    validate_preflight(result["preflight"])
     validate_checks(result["checks"], f"Policy file {path}")
     review = result["review"]
     if set(review) - set(DEFAULTS["review"]):
@@ -114,7 +121,7 @@ def load(repo=None, origin=None):
     for key in ("max_rounds", "panel_timeout", "max_prompt_bytes", "confirm_timeout"):
         if type(review[key]) is not int or review[key] < 1:
             raise CardError(f"Policy file {path}: review.{key} must be a positive integer.")
-    for key in ("check_timeout", "max_defect_failures"):
+    for key in ("check_timeout", "max_defect_failures", "max_attempts"):
         if type(result[key]) is not int or result[key] < 1:
             raise CardError(f"Policy file {path}: {key} must be a positive integer.")
     for key in ("author_model", "primary_model"):

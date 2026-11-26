@@ -1,4 +1,4 @@
-"""One independently diagnosed recovery pass at an acceptance boundary."""
+"""Diagnose each failed implementation attempt within a shared correction budget."""
 import hashlib
 import json
 import time
@@ -13,15 +13,8 @@ KINDS = ("verification", "review", "provider")
 
 def trigger(state, settings, kind):
     rnd = state["rounds"][-1] if state["rounds"] else {}
-    if kind == "verification":
-        if state["counters"]["defect"] >= settings["max_defect_failures"] + state["extra_failures"]:
-            last = next((v for v in reversed(state["verifications"]) if v["result"] == "defect"), None)
-            if last:
-                failed = [{"check": c["name"], "problem": c["problem"], "log": c["log"]}
-                          for c in last["checks"] if c["klass"] != "pass"]
-                return {"receipt": last["id"], "tree": last["tree"], "failed": failed}
-    if kind == "review" and rnd.get("outcome") == "owner":
-        return {"round": rnd["n"], "tree": rnd["tree"], "blocking": rnd["blocking"], "brief": rnd["fix_brief"]}
+    if kind != "provider":
+        return correction_facts(state, kind)
     if kind == "provider" and settings["review"]["panel_required"] and rnd.get("outcome") is None:
         from .review import owed
         failed = {name: r["reason"] for name, r in rnd.get("panel", {}).items() if r.get("status") == "unavailable"}
@@ -63,9 +56,114 @@ def progressed(state, kind, before, current):
                    for k in old) for r in state["rounds"])
 
 
+def correction_facts(state, kind):
+    if kind == "verification":
+        last = state["verifications"][-1] if state["verifications"] else {}
+        if last.get("result") == "defect":
+            return {"receipt": last["id"], "tree": last["tree"],
+                    "failed": [{"check": c["name"], "problem": c["problem"], "log": c["log"]}
+                               for c in last["checks"] if c["klass"] != "pass"]}
+    if kind == "review" and state["rounds"]:
+        rnd = state["rounds"][-1]
+        if rnd.get("outcome") in ("changes", "owner"):
+            return {"round": rnd["n"], "tree": rnd["tree"], "blocking": rnd["blocking"], "brief": rnd["fix_brief"]}
+        if rnd.get("outcome") == "accept":
+            from .findings import inline_pending
+            keys = sorted(k for k, e in state["ledger"].items()
+                          if e["status"] == "confirmed" and e.get("sources") or inline_pending(e))
+            if keys:
+                return {"round": rnd["n"], "tree": rnd["tree"], "blocking": keys, "brief": rnd["fix_brief"],
+                        "evidence": {k: hashlib.sha256(json.dumps(
+                            {field: state["ledger"][k].get(field) for field in ("confirm", "sources", "triage")},
+                            sort_keys=True).encode()).hexdigest() for k in keys}}
+    return None
+
+
+def correction_key(kind, facts):
+    return hashlib.sha256(json.dumps([kind, facts], sort_keys=True).encode()).hexdigest()
+
+
+def attempt_limit(state, settings):
+    return min(settings["max_attempts"], settings["max_defect_failures"], settings["review"]["max_rounds"]) + state["extra_rounds"] + state["extra_failures"]
+
+
+def correction_issue(state, settings, kind):
+    facts = correction_facts(state, kind)
+    if not facts:
+        return None
+    entry = state.get("diagnoses", {}).get(correction_key(kind, facts), {})
+    if not entry.get("child"):
+        return f"Diagnose the failed attempt before another correction. Run ai-dev-card recover {kind}."
+    if not entry.get("authorized"):
+        return (f"The attempt budget is exhausted. Run ai-dev-card recover {kind} for the diagnosis handoff; "
+                "then kanban_block(kind='needs_input'). Only an owner-approved review extend can permit another attempt.")
+    return None
+
+
+def require_diagnosis(state, settings):
+    if state.get("attempt", 1) > attempt_limit(state, settings):
+        raise CardError("The inherited attempt budget is exhausted. Call kanban_block(kind='needs_input'); "
+                        "an owner-approved ai-dev-card review extend is required.", code=3)
+    for kind in ("verification", "review"):
+        issue = correction_issue(state, settings, kind)
+        if issue:
+            raise CardError(issue, code=3)
+
+
+def recover_correction(card, settings, kind, child):
+    snapshot = card.load()
+    facts = correction_facts(snapshot, kind)
+    if not facts:
+        return {"action": "none", "next": "No failed attempt at this stage. Run ai-dev-card status."}, 0
+    key = correction_key(kind, facts)
+    old = snapshot.get("diagnoses", {}).get(key)
+    if child and not old:
+        raise CardError(f"Run ai-dev-card recover {kind} first and dispatch the returned diagnosis.")
+    evidence = confirmed_child(card, child, old["marker"]) if child else None
+    with card.locked() as state:
+        if correction_facts(state, kind) != facts:
+            raise CardError(f"The failed attempt changed during diagnosis validation. Run ai-dev-card recover {kind} again.")
+        entries = state.setdefault("diagnoses", {})
+        entry = entries.get(key)
+        if not entry:
+            marker = "ai-dev-diagnosis-" + hashlib.sha256(f"{card.board}/{card.id}/{key}".encode()).hexdigest()
+            entry = entries[key] = {"marker": marker, "facts": facts, "kind": kind}
+            record(state, "diagnosis.requested", kind=kind, marker=marker, evidence=facts)
+        if not entry.get("child") and not child:
+            body = (f"{entry['marker']}\nDiagnose the failed {kind} attempt for {card.board}/{card.id}. "
+                    "Read the parent history and every earlier diagnosis. Explain why the last correction failed, "
+                    "cite evidence, and validate a different next step. If no supported correction exists, say so. "
+                    "Do not modify the candidate or relax acceptance. At the attempt limit prepare the owner handoff, "
+                    "not another automatic correction.\n" + json.dumps(facts, ensure_ascii=False))
+            return {"action": "dispatch", "repair_request": {"title": f"Diagnose {kind} attempt for {card.id}",
+                    "body": body, "idempotency_key": entry["marker"], "skills": ["ai-dev-repair"],
+                    "workspace_kind": "scratch", "assignee": "default"},
+                    "next": f"Create or reuse this diagnosis, link it as parent of {card.id}, wait for completion, "
+                    f"then run ai-dev-card recover {kind} --resolved CHILD_ID."}, 0
+        if not entry.get("child"):
+            entry.update(child=child, diagnosis=evidence)
+            record(state, "diagnosis.completed", kind=kind, child=child, evidence=evidence)
+        used = state.get("attempt", 1)
+        if not entry.get("authorized") and used < attempt_limit(state, settings):
+            state["attempt"] = used + 1
+            entry["authorized"] = state["attempt"]
+            record(state, "correction.authorized", attempt=state["attempt"], kind=kind, child=entry["child"])
+        if entry.get("authorized"):
+            step = ("Apply the diagnosed correction and run ai-dev-card verify." if kind == "verification" else
+                    "Run ai-dev-card review settle, then return the card to its author with the diagnosis and fix brief; for late findings first run "
+                    "ai-dev-card finding return --reason TEXT.")
+            return {"action": "resume", "attempt": entry["authorized"], "child": entry["child"],
+                    "diagnosis": entry["diagnosis"], "next": step}, 0
+        return {"action": "handoff", "attempt": used, "child": entry["child"], "diagnosis": entry["diagnosis"],
+                "next": "The attempt budget is exhausted. Hand the PR, reproductions and diagnoses to the owner. "
+                "Keep merge closed and call kanban_block(kind='needs_input')."}, 3
+
+
 def recover(card, worktree, kind, child=None):
     repo = gitio.repo_root(worktree)
     settings = policy.load(repo=gitio.main_repo(repo), origin=gitio.origin(repo))
+    if kind != "provider":
+        return recover_correction(card, settings, kind, child)
     # No provider, Hermes or network call while holding the card lock. The next transaction
     # rechecks the triggering condition, so a stale child result cannot extend another round.
     previous = card.load().get("recoveries", {}).get(kind, {})
@@ -124,14 +222,7 @@ def recover(card, worktree, kind, child=None):
                     "workspace_kind": "scratch", "assignee": "default"}, "next":
                     f"Create or reuse this repair card, link it as parent of {card.id}, record its ID, and wait on "
                     f"that dependency. Once complete run ai-dev-card recover {kind} --resolved CHILD_ID."}, 0
-        if kind == "verification":
-            state["extra_failures"] += 1
-            step = "The author applies the diagnosed correction and runs ai-dev-card verify at the failed stage."
-        elif kind == "review":
-            state["extra_rounds"] += 1
-            step = "Run ai-dev-card review settle, then request changes with the diagnosis and existing fix brief."
-        else:
-            step = "Run ai-dev-card review panel once; completed reviewer reports remain in the same round."
+        step = "Run ai-dev-card review panel once; completed reviewer reports remain in the same round."
         incident.update(child=child, diagnosis=evidence, next=step, granted_facts=facts)
         record(state, "recovery.granted", kind=kind, child=child, diagnosis=evidence)
         return {"action": "resume", "next": step, "diagnosis": evidence}, 0

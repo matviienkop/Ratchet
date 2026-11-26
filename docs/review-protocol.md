@@ -24,7 +24,7 @@ The protocol exists to end one failure: a green candidate that a reviewer return
 6. **Settled stays settled.** A finding that was fixed, disproved, unconfirmed or waived returns to `candidate` only when a reviewer raises it again. It is then judged as stated in the new report and needs a new confirmation on the current tree.
 7. **Closure is checked by code.** When a new candidate arrives, every stored reproduction of a confirmed blocker is rerun on it. One that passes marks its finding `fixed`. The reviewer does not vote on it.
 8. **Round 1 is full, later rounds are delta.** The brief of a later round carries the interdiff from the previous candidate and the open blockers.
-9. **Cap.** With `max_rounds: 3`, rounds 1 and 2 may end in `changes`. A third round with a blocker still open ends in `owner`.
+9. **Cap.** Five implementation attempts share one budget across failed verification, review and late returns. Every failed attempt requires an independent diagnosis before correction. The fifth failure requires a final diagnosis and an owner handoff, not a sixth attempt. See the effective policy ceilings in operations.md.
 10. **No unanimity.** With a panel, a single confirmed blocker blocks and an unconfirmed objection does not. Agreement between reviewers is not required.
 
 ## Impact, confidence and disposition
@@ -73,10 +73,9 @@ ai-dev-card finding list
 
 Assess rating conflicts with `finding assess`, then reproduce blocker candidates with `confirm`. These commands also work on imported findings after acceptance. A failed confirmation remains visible; a contractual finding with no reproduction needs the owner's explicit waiver, not silent completion.
 
-For a confirmed late defect run `ai-dev-card finding return --reason TEXT` in the active Hermes worker, then call `kanban_request_changes`. The planner can use native `hermes kanban reopen-review` when the card is already done. Each return authorization records its tree and native run or planner session. Retries in that run reuse the reservation; a new run needs a new reservation. At most two reservations are available. Native Hermes remains responsible for performing transitions. A direct planner CLI transition must follow the same ledger procedure; Ratchet is not an adversarial boundary around the service account.
+For a confirmed late defect run `ai-dev-card recover review`, complete the linked diagnosis, then record `ai-dev-card finding return --reason TEXT` in the active Hermes worker and call `kanban_request_changes`. The planner can use native `hermes kanban reopen-review` when the card is already done. Each return records its tree and native run or planner session. Repeated commands reuse the diagnosis authorization; changing sessions cannot add another correction attempt. Native Hermes remains responsible for transitions. A direct planner CLI transition must follow this procedure; Ratchet is not an adversarial boundary around the service account.
 
-After two late returns, confirmed residual regressions can be deferred with `finding resolve KEY --outcome deferred --ticket HTTPS_URL --reason TEXT`. An unmet contract criterion cannot be discharged by creating a ticket: fix it or record the owner's explicit waiver. Keep the original criteria when rewriting the implementation. Ordinary review caps still apply; this command creates no extra review rounds.
-
+Exhausting the shared attempt budget does not authorize deferring a high/critical regression or an unmet criterion. After the final diagnosis, a low/medium hosted regression outside the contract may use a linked follow-up. Keep merge closed and provide the final diagnosis to the owner. Baseline discoveries retain their importance, size and risk triage and can still use a permitted follow-up.
 Before completion, every finding of medium severity or above and every contractual finding needs a disposition. Low non-contract notes stay advisory. The explicit outcomes are:
 
 - `fixed` or `disproved`, derived from running the reproduction;

@@ -1,0 +1,19 @@
+{
+  "source": {"kind": "chat", "reference": "platform/thread/message", "text": "Original request, with secrets redacted"},
+  "title": "Observable change",
+  "problem": "Current behavior and affected users",
+  "outcome": "Desired behavior and value",
+  "repository": "Canonical origin URL or main checkout absolute path",
+  "scope": ["Included behavior"],
+  "non_goals": ["Excluded behavior"],
+  "criteria": ["Observable acceptance outcome"],
+  "constraints": [],
+  "facts": ["Finding supported by evidence reference"],
+  "hypotheses": [],
+  "evidence": [{"source": "repository", "question": "Where is this behavior implemented?", "status": "checked", "reference": "revision:path", "summary": "Observed behavior and limitations"}],
+  "unknowns": [{"question": "Unresolved decision", "blocking": true, "next_step": "Specific query or owner decision"}],
+  "risks": [{"area": "recovery", "assessment": "Applicable failure scenario or reason it is not relevant"}],
+  "decomposition": {"decision": "single", "reason": "One cohesive implementation scope", "children": []},
+  "budget": {"minutes": 15, "used_minutes": 0},
+  "readiness": "needs_input"
+}

@@ -109,11 +109,23 @@ class Install(unittest.TestCase):
         self.assertFalse((coder / "skills/software-development/ai-dev-planner").exists())
         planner = self.hermes / "skills/software-development"
         self.assertTrue((planner / "ai-dev-planner/SKILL.md").is_file())
+        self.assertTrue((planner / "ai-dev-planner/references/task-analysis.md").is_file())
+        template = json.loads((planner / "ai-dev-planner/references/analysis-template.json").read_text())
+        self.assertEqual(template["readiness"], "needs_input")
+        research = planner / "ai-dev-research/references"
+        templates = json.loads((research / "mcp-templates.json").read_text())["mcp_servers"]
+        self.assertEqual(len(templates), 7)
+        self.assertTrue(all(not c["enabled"] and c["tools"]["include"] == [] for c in templates.values()))
+        self.assertIn("--disable-write", templates["project_grafana_local"]["args"])
+        self.assertTrue(templates["project_linear"]["url"].endswith("/readonly"))
+        self.assertFalse((coder / "skills/software-development/ai-dev-research").exists())
         self.assertTrue((planner / "project-onboarding/references/research.md").is_file())
         self.assertIn(str((self.root / "bin").resolve()), (planner / "ai-dev-planner/SKILL.md").read_text())
         done = subprocess.run([str(self.root / "bin" / "ai-dev-card"), "doctor"], capture_output=True, text=True,
                               env={**os.environ, "AI_DEV_HOME": str(self.root / "home")})
         self.assertEqual(json.loads(done.stdout)["version"], "2.0.0")
+        from ai_dev.analytics import workflow_fingerprint
+        self.assertEqual((self.root / "prefix/ai_dev/workflow.sha256").read_text().strip(), workflow_fingerprint())
 
     def test_onboarding_tools_get_the_workspace_default(self):
         self.assertEqual(self.run_install("--workspace", str(self.root / "projects")), 0)
