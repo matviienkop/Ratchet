@@ -12,30 +12,6 @@
       "url": "https://mcp.linear.app/mcp/readonly",
       "auth": "oauth"
     },
-    "project_confluence": {
-      "enabled": false,
-      "timeout": 60,
-      "connect_timeout": 30,
-      "tools": {
-        "include": [],
-        "resources": false,
-        "prompts": false
-      },
-      "url": "https://mcp.atlassian.com/v2/mcp",
-      "auth": "oauth"
-    },
-    "project_grafana_cloud": {
-      "enabled": false,
-      "timeout": 60,
-      "connect_timeout": 30,
-      "tools": {
-        "include": [],
-        "resources": false,
-        "prompts": false
-      },
-      "url": "https://mcp.grafana.com/mcp",
-      "auth": "oauth"
-    },
     "project_grafana_local": {
       "enabled": false,
       "timeout": 60,

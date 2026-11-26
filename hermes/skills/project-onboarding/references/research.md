@@ -38,4 +38,6 @@ Analyze the assigned checkout at the assigned revision to recover its role, arch
 }
 ```
 
+For `check` findings start from what Hermes detects itself: run `hermes verify --detect-only` in the checkout and confirm each command it lists against the repository's own documentation or CI file before you record it. Record only commands you saw defined in the repository.
+
 Valid kinds are `component`, `architecture`, `requirement`, `rule`, `style`, `check`, `delivery`, `task`, and `question`. Task status is `open`, `done`, `deferred`, `superseded` or `uncertain`. Put conflicting requirements in `question` with their scope. Each finding must contain a single-line statement. A recorded command describes a procedure; running it is a separate action. Finish by returning the checkout, recorded revision and relevant blockers to the coordinator.

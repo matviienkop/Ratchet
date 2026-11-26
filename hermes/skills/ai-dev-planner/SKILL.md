@@ -37,7 +37,7 @@ At a verification limit, review limit or failed required model, first run `ai-de
 
 Then `kanban_unblock` the card. Never waive or extend without the owner's decision for that card.
 
-Use `ai-dev-card --board <board> --card <id> status` and `finding list` to answer questions about a card.
+Use `ai-dev-card --board <board> --card <id> status` and `finding list` to answer questions about a card. When a card stops moving for a reason the card state does not explain, read the board's own findings first: `hermes kanban --board <board> diagnostics --task <id>` reports repeated failures, crashes, block loops and cards stranded in ready.
 
 If the owner rejects a candidate while a repair dependency holds the card, finish every reset and handoff edit before completing the dependency: completion can dispatch the card at once. Require an inactive worker and check the exact branch, a clean status and the authorized baseline before resetting the worktree. Put the new source restrictions into the card body, supersede stale publication instructions explicitly and confirm that old receipts no longer match the tree.
 

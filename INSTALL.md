@@ -47,6 +47,8 @@ Upgrading from ai-dev 1.x: add `--remove-legacy` to delete the old `ai-dev-journ
 
 To update later: `git -C ~/ai-dev-source pull` and run the installer again.
 
+Hermes stops a plugin hook after 30 seconds and blocks the tool call it guarded (`plugins.hook_callback_timeout`, Hermes 0.21.5 `hermes_cli/plugins.py`). The gate reads GitHub when a card with `pr_ci` completes, and several slow answers in a row can pass that limit. For the coder and reviewer profiles raise it: `hermes -p NAME config set plugins.hook_callback_timeout 120`.
+
 ## 3. Policy
 
 Copy [examples/policy.json](examples/policy.json) to `~/.ai-dev/policy.json` and edit it: the checks per repository, the review settings. A root-owned `/etc/ai-dev/policy.json` takes precedence, and a worker cannot edit it.

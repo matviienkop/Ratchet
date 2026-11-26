@@ -196,7 +196,8 @@ def local_rows(card, state, clock):
 
 
 def runtime(value):
-    row = select(value, "model provider session_id started finished duration_seconds tree prompt_sha256 api_calls total_tokens")
+    row = select(value, "model provider session_id started finished duration_seconds tree prompt_sha256 api_calls total_tokens "
+                 "input_tokens output_tokens estimated_cost_usd cost_status cost_source")
     start, end = timestamp(value.get("started")), timestamp(value.get("finished"))
     row["duration_seconds"] = max(0, end - start) if start is not None and end is not None else None
     usage = value.get("usage") or {}

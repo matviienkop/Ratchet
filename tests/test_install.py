@@ -119,8 +119,13 @@ class Install(unittest.TestCase):
         self.assertEqual(template["readiness"], "needs_input")
         research = planner / "ai-dev-research/references"
         templates = json.loads((research / "mcp-templates.json").read_text())["mcp_servers"]
-        self.assertEqual(len(templates), 7)
+        # Which sources get a template is a documentation choice. What every template must hold is that
+        # copying it grants nothing: disabled, no tool selected, secrets only as references.
+        self.assertTrue(templates)
         self.assertTrue(all(not c["enabled"] and c["tools"]["include"] == [] for c in templates.values()))
+        secrets = [v for c in templates.values() for k, v in [*c.get("env", {}).items(), *c.get("headers", {}).items()]
+                   if k == "Authorization" or k.endswith("_TOKEN")]
+        self.assertTrue(all("${" in v for v in secrets), secrets)
         self.assertIn("--disable-write", templates["project_grafana_local"]["args"])
         self.assertTrue(templates["project_linear"]["url"].endswith("/readonly"))
         self.assertFalse((coder / "skills/software-development/ai-dev-research").exists())

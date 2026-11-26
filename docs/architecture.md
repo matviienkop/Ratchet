@@ -8,7 +8,7 @@ Hermes references are to `NousResearch/hermes-agent` at v0.23.4 (`0bf290fd4a`). 
 | --- | --- | --- |
 | Pick and start the next step | Hermes | Dispatcher loop inside the gateway promotes, claims and spawns the assignee profile (`website/docs/user-guide/features/kanban.md`, "Dispatcher") |
 | Worker liveness | Hermes | Claim TTL 15 min extended by tool activity, heartbeat, crash detection by PID (`hermes_cli/kanban_db.py:280-306`) |
-| A worker that stops without finishing | Hermes | Two in-agent nudges, then bounded retry, limit 3, then the card is blocked (`hermes_cli/kanban_db_dispatch.py:938`) |
+| A worker that stops without finishing | Hermes | In-agent nudges, then bounded retry: the card is blocked after 2 consecutive failed runs (`DEFAULT_FAILURE_LIMIT`, `hermes_cli/kanban_db_dispatch.py`) or 3 protocol violations in a row; a card blocked twice for the same reason moves to `triage` (`BLOCK_RECURRENCE_LIMIT`, `hermes_cli/kanban_db.py`) |
 | Quota and provider errors | Hermes | Exit 75 requeues with a 5 min cooldown and no failure count; exit 78 blocks at once |
 | Waiting | Hermes | `kanban_block` kinds; `dependency` resumes when the parent card finishes; repeated blocks escalate to `triage` |
 | Owner notices | Hermes | Gateway notifier delivers terminal events to the subscribed chat |

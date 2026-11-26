@@ -640,7 +640,9 @@ def _runtime(member, text, usage_path):
                 or not isinstance(usage.get("api_calls"), int) or usage["api_calls"] < 1):
             raise review_routes.AttestationError("Hermes usage receipt does not attest a completed response from the pinned OpenAI model")
         report, _ = _extract(text, "hermes-usage")
-        return report, {k: usage[k] for k in ("model", "provider", "session_id", "api_calls", "total_tokens") if k in usage}
+        return report, {k: usage[k] for k in ("model", "provider", "session_id", "api_calls", "total_tokens", "input_tokens",
+                                              "output_tokens", "estimated_cost_usd", "cost_status", "cost_source")
+                        if usage.get(k) is not None}
     report, model = _extract(text, kind, member.get("model"))
     if kind == "claude-json":
         envelope = json.loads(text)
