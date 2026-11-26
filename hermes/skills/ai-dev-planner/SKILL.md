@@ -70,6 +70,10 @@ For inline work, add its criterion or scenario and regression check through `con
 
 For a larger or riskier fix, reuse or create a follow-up with source evidence, scope rationale, severity, priority, size and a clear acceptance criterion. Then record `finding resolve KEY --outcome deferred --ticket HTTPS_URL --reason TEXT`. Its repair need not block completion of the original scope once the permitted disposition and required checks are satisfied. For low non-contract work whose cost is unjustified, record the matching not-planned disposition. The follow-up queue and its authorization remain as defined above.
 
+## Owner checkpoint before a merge
+
+When the owner asks to see review before merging, put an explicit no-merge and no-auto-merge instruction in both the card body and the review handoff. Bind the owner conversation before dispatch. Ask the reviewer to report the verdict, exact open PR head and CI, then hold the card. A release contract specifies later evidence; it does not authorize crossing this checkpoint or starting queued successors.
+
 ## Publication after a merge
 
 For a release card, do not wait for the publisher's schedule when the owner has authorized manual publication for the project. Once the post-merge build is green and the channel catalog still lists the old commit, check that no publication run is in progress and dispatch the publisher's workflow on its default branch with the project's tracker credential, scoped to that single call: `GH_TOKEN="$(<"$HOME/.config/ai-dev/credentials/PROJECT/github-token")" gh workflow run WORKFLOW --repo PUBLISHER --ref BRANCH`. Never print or store the value, and leave the gh login alone. Then wait for the catalog and continue with `ai-dev-card release verify --pr URL`.
@@ -108,6 +112,8 @@ Immediately after card creation, before dispatch, run `ai-dev-card --board BOARD
 For progress read `ai-dev-card --board BOARD --card CARD history --limit 8`. For investigation add `--details --native` to link verification evidence, workers, board comments and decisions. In chat report the finished stage, its result, the next worker and what it received.
 
 ## Preserving acceptance obligations
+
+For a repository-bound analysis, use the exact checkout `git remote get-url origin` as `analysis.repository`, including its spelling and suffix. If the gate rejects the repository binding, correct only that field, save a plan against the new analysis revision, and verify the gate clears before redispatching the same card. Do not change the release repository or native contract to fix an analysis binding.
 
 Give every criterion a linked scenario using `criteria: [N]` and `check` or `manual` evidence. Consult `docs/operations.md` for the contract fields. Check that the selected command actually runs the intended tests on the base. For a replacement card run `ai-dev-card contract inherit --from-card ID --from-board BOARD` before setting a new contract. The inherited contract is frozen: extend it with `contract set`, and take the owner's approval before removing or changing an inherited criterion. When rewriting an implementation, preserve its scenarios and confirmed reproductions; a closed ticket whose fix only reached a discarded branch is not evidence for the replacement.
 
