@@ -8,6 +8,7 @@ Severity measures the consequence on a supported path:
 - high: a core operation fails for many users or breaks upgrades, with no practical workaround.
 - medium: a supported case produces incorrect results or needs a meaningful manual workaround.
 - low: minor inconvenience or maintainability issue, such as misleading wording with no change in behavior.
+Test-only findings use the consequence of the criterion left unproven, not the file type.
 Confidence (low, medium, high) measures how well the evidence supports the claim. Impact describes who or what
 is affected and what happens. A high-confidence typo is still low severity. A suspected critical outcome needs proof.
 """

@@ -36,6 +36,8 @@ DEFAULTS = {
     "max_defect_failures": 6,
     "delivery": "local",
     "release": None,
+    "pr_ci": None,
+    "require_scenario_evidence": True,
     "review": {"max_rounds": 3, "author_model": None, "primary_model": None, "reviewer": "reviewer", "panel": [OPENAI_PANEL, CLAUDE_PANEL], "panel_required": True,
                "panel_timeout": 1200, "max_prompt_bytes": 400_000, "confirm_timeout": 600},
 }
@@ -101,6 +103,10 @@ def load(repo=None, origin=None):
         raise CardError(f"Policy file {path} has unknown settings: {', '.join(sorted(unknown))}.")
     if result["release"] is not None:
         release.validate(result["release"])
+    if result["pr_ci"] is not None:
+        release.validate_pr_ci(result["pr_ci"])
+    if type(result["require_scenario_evidence"]) is not bool:
+        raise CardError("Set require_scenario_evidence to true or false in the policy, then run ai-dev-card doctor.")
     validate_checks(result["checks"], f"Policy file {path}")
     review = result["review"]
     if set(review) - set(DEFAULTS["review"]):

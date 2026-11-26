@@ -28,6 +28,8 @@ ai_dev/policy.py    operator settings: checks, budgets, review rules per reposit
 ai_dev/gitio.py     tree snapshot, anchored commits, diffs, scratch checkouts
 ai_dev/verify.py    contract, check runner, base probe, receipts, failure budget
 ai_dev/review.py    brief, reports, ledger, confirmation, settle, panel
+ai_dev/findings.py  hosted finding intake, explicit dispositions, bounded late-return reservations
+ai_dev/continuity.py carry obligations and reproductions into a fresh implementation card
 ai_dev/gate.py      allow or block a board tool for the coder or reviewer lane
 ai_dev/stands.py    trusted stand drivers
 ai_dev/cli.py       the ai-dev-card command
@@ -77,8 +79,8 @@ The plugin is installed with a lane per profile, written to a `role` file next t
 | --- | --- | --- |
 | coder | `kanban_request_review` | the card has a contract and a passing `pre_review` receipt for the workspace tree as it is at this moment |
 | coder | `kanban_complete`, `kanban_request_changes` | never; a coding card finishes through review |
-| reviewer | `kanban_request_changes` | the last round is settled for this tree with outcome `changes`, or with `accept` and a `post_review` check then failed on the change |
-| reviewer | `kanban_complete` | the last round is settled for this tree with outcome `accept`, and `post_review` checks passed if any are defined |
+| reviewer | `kanban_request_changes` | the last round is settled for this tree with outcome `changes`, or with `accept` and a `post_review` check failed or a confirmed late defect has a bounded return reservation |
+| reviewer | `kanban_complete` | the last round is settled for this tree with outcome `accept`, current checks and manual evidence passed, required findings have dispositions, and configured delivery evidence is current |
 | reviewer | `kanban_request_review` | never |
 
 A refusal carries the command to run next. An error inside the gate blocks the call.
@@ -89,8 +91,8 @@ A refusal carries the command to run next. An error inside the gate blocks the c
 - **Owner references are recorded, not verified.** `--owner-ref` on a waiver, an extension or a weakened contract is a string. The planner skill requires the owner's explicit word; the audit trail is in `card.json` and in Kanban comments.
 - **A reproduction can be wrong.** For a claimed regression the test must pass on the base, which rules out a test that always fails. For a criterion or scenario violation only the candidate is decisive. The same test must pass after the fix, so a bogus test reaches independent diagnosis at the round cap. A remaining mandatory gate gets an evidence-backed handoff.
 - **One repository per card.** A change across repositories is several linked cards.
-- **Not exercised in a live Hermes worker yet.** In particular: that plugin hooks load in dispatcher-spawned workers, that a pinned skill reaches the reviewer run, and that the reviewer works in the same worktree. The first live run checks these.
+- **Live qualification is version-specific.** The Telegram/GitHub project flow has run on Hermes 0.21.5. Container startup and persistence smoke tests cover the newer image; they do not establish a complete model-driven card cycle on Hermes 0.23.4. Qualify that cycle before relying on changed dispatcher or provider behavior.
 
-## Not built
+## Remaining integration work
 
-Watched Slack channels and triage, hosted-review reactions on a published PR, package and install evidence for release cards, token accounting, and the wiring of `ai-dev-incident` and `ai_dev_board.py` (GitHub follow-ups and Projects status) into Kanban's lifecycle hooks.
+Hosted findings have an explicit import/disposition command, but no automatic comment collector. Package release receipts are implemented; installed-product behavior checks remain project-specific. Watched Slack-channel triage, complete token accounting, and a full live qualification of all tracker adapters remain separate work. Keep publication, installation and product-behavior evidence distinct.

@@ -24,12 +24,21 @@ def validate_contract(contract):
     criteria = contract.get("criteria")
     if not isinstance(criteria, list) or not criteria or not all(isinstance(c, str) and c.strip() for c in criteria):
         raise CardError("A contract needs criteria: a nonempty list of observable outcomes.")
+    if not isinstance(contract.get("scenarios", []), list):
+        raise CardError("Scenarios must be a list. Run ai-dev-card contract set --file FILE.")
     seen = set()
     for scenario in contract.get("scenarios", []):
-        if (not isinstance(scenario, dict) or set(scenario) - {"id", "operation", "expected", "check"}
+        if (not isinstance(scenario, dict) or set(scenario) - {"id", "operation", "expected", "check", "manual", "criteria"}
                 or not all(isinstance(scenario.get(k), str) and scenario[k].strip() for k in ("id", "operation", "expected"))
                 or not policies.NAME.fullmatch(scenario["id"]) or scenario["id"] in seen):
             raise CardError("Each scenario needs a unique lowercase id, an operation and the expected result.")
+        links = scenario.get("criteria", [])
+        if (not isinstance(links, list) or any(type(n) is not int or not 1 <= n <= len(criteria) for n in links)):
+            raise CardError("Scenario criteria must list 1-based criterion numbers. Run ai-dev-card contract set --file FILE.")
+        if "manual" in scenario and (not isinstance(scenario["manual"], str) or not scenario["manual"].strip()):
+            raise CardError("Scenario manual must name an evidence file. Run ai-dev-card contract set --file FILE.")
+        if "check" in scenario and "manual" in scenario:
+            raise CardError("Choose check or manual evidence for a scenario. Run ai-dev-card contract set --file FILE.")
         seen.add(scenario["id"])
     policies.validate_checks(contract.get("checks", []), "Contract")
     for scenario in contract.get("scenarios", []):
@@ -48,7 +57,8 @@ def set_contract(state, contract, owner_ref=None):
     old = state["contract"]
     if old and state["frozen"] and new != old:
         keeps = (new["criteria"][:len(old["criteria"])] == old["criteria"]
-                 and all(row in new["scenarios"] for row in old["scenarios"])
+                 and all(any(all(candidate.get(k) == v for k, v in row.items()) for candidate in new["scenarios"])
+                         for row in old["scenarios"])
                  and all(row in new["checks"] for row in old["checks"])
                  and ("release" not in old or old["release"] == new.get("release")))
         if not keeps and not owner_ref:
@@ -73,6 +83,42 @@ def checks_for(settings, contract, stage):
         names.add(check["name"])
         merged.append(check)
     return merged
+
+
+def scenario_evidence(contract, settings):
+    checks = [c for stage in policies.STAGES for c in checks_for(settings, contract, stage)]
+    names = {c["name"] for c in checks}
+    covered = set()
+    for scenario in contract.get("scenarios", []):
+        name = scenario.get("check")
+        if name is not None and name not in names:
+            raise CardError(f"Scenario {scenario['id']} names unknown check {name!r}. Run ai-dev-card contract set --file FILE with an existing check.")
+        if settings.get("require_scenario_evidence", True):
+            if not name and not scenario.get("manual"):
+                raise CardError(f"Scenario {scenario['id']} needs check or manual evidence. Run ai-dev-card contract set --file FILE.")
+            covered.update(scenario.get("criteria", []))
+    missing = set(range(1, len(contract["criteria"]) + 1)) - covered
+    if settings.get("require_scenario_evidence", True) and missing:
+        raise CardError(f"Criteria {sorted(missing)} have no scenario evidence. Add scenario.criteria links with ai-dev-card contract set --file FILE.")
+
+
+def manual_evidence(card, state, tree):
+    proofs = {}
+    for scenario in state["contract"].get("scenarios", []):
+        if not scenario.get("manual"):
+            continue
+        path = Path(scenario["manual"])
+        if not path.is_absolute() or not path.resolve().is_relative_to(card.evidence().resolve()):
+            raise CardError("Manual proof must be a JSON file in this card's evidence directory. Run ai-dev-card status and record the current tree, scenario and result.")
+        try:
+            proof = json.loads(path.read_bytes())
+        except (OSError, ValueError) as error:
+            raise CardError("Cannot read manual proof. Run ai-dev-card status and record evidence for this candidate.") from error
+        if (not isinstance(proof, dict) or proof.get("tree") != tree or proof.get("scenario") != scenario["id"]
+                or proof.get("result") != "pass" or not isinstance(proof.get("observed"), str) or not proof["observed"].strip()):
+            raise CardError("Manual proof needs current tree, scenario, result=pass and observed behavior. Run ai-dev-card status and repeat the manual check.")
+        proofs[scenario["id"]] = {"path": str(path), "sha256": file_digest(path), "tree": tree}
+    return proofs
 
 
 def run(argv, cwd, log_path, timeout):
@@ -123,6 +169,7 @@ def prepare(state, worktree):
     if not state["base"]:
         state["base"] = gitio.resolve_base(worktree, settings["target_branch"])
         state["repo"] = str(gitio.main_repo(worktree))
+    scenario_evidence(state["contract"], settings)
     return worktree, settings, gitio.snapshot(worktree)
 
 

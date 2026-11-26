@@ -56,7 +56,7 @@ A finding that arrives after the round settled `accept` (a hosted review comment
 
 Settlement queues the full round summary, including an empty list, for the bound conversation. Let the notifier deliver it.
 
-Report few, high-confidence findings. An empty list is a valid result. A blocker names the criterion or scenario it violates, or is a regression against the base. Everything else is a note. A defect that already exists on the base is a discovery: it goes to a follow-up, it does not block this card.
+Report few, high-confidence findings. An empty list is a valid result. A blocker names the criterion or scenario it violates, or is a regression against the base. Everything else is a note. A defect that already exists on the base is a discovery only when it is outside this contract. A promised correction still blocks when it fails on the candidate, even if it also fails on the base.
 
 ## Language and style
 
@@ -84,3 +84,13 @@ When an independent environment or baseline failure prevents a required check, u
 On resumption, read the repair worker's evidence, rerun the same check on the original candidate and stage, and record the result. If a completed repair did not work, retain its evidence; identify the residual cause and dispatch a distinct repair keyed by that cause. A failing required check still needs a passing receipt. An unrelated finding that leaves acceptance unaffected only needs a follow-up.
 
 For a stand diagnostic or dedicated repair, load [stand operations](references/stands.md) on demand.
+
+## Evidence and hosted review
+
+Every criterion needs a scenario with `criteria: [N]` and an existing `check` name or a `manual` evidence path. Follow `docs/operations.md` for the manual proof schema. Read existing findings before starting another implementation attempt. Silence in a later review does not resolve a gap.
+
+Before merging or completing, reread hosted comments on the current PR, including comments added during a failed merge or a long wait. Import each actionable finding with `ai-dev-card finding import --file FILE`; the file contains source URL, reviewed tree and one panel-format finding. Assess and confirm it, then record its disposition. Run `finding list` and follow `review settle` again. An imported finding does not replace independent panel evidence.
+
+Use `finding resolve KEY --outcome deferred --ticket HTTPS_URL --reason TEXT` for a permitted follow-up. Unmet contract criteria require correction or an explicit owner waiver. For a confirmed defect arriving after acceptance use `finding return --reason TEXT`, then the native return; never exceed two late returns. `finding resolve --outcome resolved --evidence FILE --reason TEXT` closes a gap with current evidence, not a confirmed defect.
+
+For `delivery: pr` with `pr_ci`, run `ai-dev-card release check-pr --pr URL` and pass the same URL as `metadata.published_pr` to completion. The gate rechecks the current head and CI. A package installation receipt establishes delivery only; report running-product checks separately.

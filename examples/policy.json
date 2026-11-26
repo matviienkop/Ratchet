@@ -9,6 +9,7 @@
       "project": "example",
       "target_branch": "origin/main",
       "delivery": "pr",
+      "pr_ci": {"repository": "example/backend", "branch": "main", "ci_workflow": "build.yml"},
       "checks": [
         {"name": "unit", "argv": ["make", "test"]},
         {"name": "lint", "argv": ["make", "lint"], "timeout": 300},

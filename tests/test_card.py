@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ai_dev import gate, gitio, notifications, policy, recovery, release, review, severity, verify
+from ai_dev import findings, gate, gitio, notifications, policy, recovery, release, review, severity, verify
 from ai_dev.store import Card, CardError
 
 PY = sys.executable
@@ -31,7 +31,7 @@ class CardCase(unittest.TestCase):
         self.policy = self.root / "policy.json"
         self.set_policy()
         env = patch.dict(os.environ, {
-            "AI_DEV_HOME": str(self.root / "home"), "AI_DEV_POLICY": str(self.policy),
+            "AI_DEV_HOME": str(self.root / "home"), "AI_DEV_POLICY": str(self.policy), "HERMES_KANBAN_RUN_ID": "test-run",
             "HERMES_KANBAN_TASK": "t_1", "HERMES_KANBAN_BOARD": "test", "HERMES_KANBAN_WORKSPACE": str(self.repo)})
         env.start()
         self.addCleanup(env.stop)
@@ -61,7 +61,7 @@ class CardCase(unittest.TestCase):
         return path
 
     def set_policy(self, **overrides):
-        settings = {"target_branch": "main", "checks": [{"name": "unit", "argv": SUITE}], **overrides}
+        settings = {"require_scenario_evidence": False, "target_branch": "main", "checks": [{"name": "unit", "argv": SUITE}], **overrides}
         settings["review"] = {"panel": [], "panel_required": False, **settings.get("review", {})}
         self.policy.write_text(json.dumps({"defaults": settings}))
 
@@ -373,7 +373,7 @@ class ReviewRounds(CardCase):
         with self.assertRaisesRegex(CardError, "not waiting for confirmation"):
             review.confirm(self.card, self.repo, key, cannot="changed my mind")
         self.assertEqual(review.settle(self.card, self.repo)["outcome"], "owner")
-        with self.assertRaisesRegex(CardError, "waits for the owner"):
+        with self.assertRaisesRegex(CardError, "at the round cap"):
             review.confirm(self.card, self.repo, key, cannot="changed my mind")
         self.assertEqual(review.settle(self.card, self.repo)["outcome"], "owner")
         self.assertIsNotNone(self.decide("kanban_complete", "reviewer"))
@@ -451,7 +451,7 @@ class ReviewRounds(CardCase):
         self.assertEqual(self.confirm(key)["status"], "confirmed")
         self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
 
-    def test_gaps_block_in_round_one_only_and_close_when_not_raised_again(self):
+    def test_gaps_survive_silent_round_and_require_current_evidence(self):
         review.brief(self.card, self.repo)
         gap = self.blocker(title="no test for div", kind="gap", mechanism="div untested")
         key = self.report([gap])["findings"][0]["key"]
@@ -462,6 +462,8 @@ class ReviewRounds(CardCase):
         review.brief(self.card, self.repo)
         late = self.report([self.blocker(title="no test for negatives", kind="gap", mechanism="negatives untested")])
         self.assertEqual(late["findings"][0]["status"], "note")
+        self.assertEqual(self.card.load()["ledger"][key]["status"], "gap")
+        findings.resolve(self.card, self.repo, key, "resolved", "A test now proves the scenario", "test_div.py")
         self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
         self.assertEqual(self.card.load()["ledger"][key]["status"], "resolved")
 
@@ -634,7 +636,7 @@ class Panel(CardCase):
                                         text=True).stdout.count("\n"), 1)
 
     def test_default_panel_cannot_be_impersonated(self):
-        self.policy.write_text(json.dumps({"defaults": {"target_branch": "main", "checks": [{"name":"unit","argv": SUITE}]}}))
+        self.policy.write_text(json.dumps({"defaults": {"require_scenario_evidence": False, "target_branch": "main", "checks": [{"name":"unit","argv": SUITE}]}}))
         packet = review.brief(self.card, self.repo)
         self.assertEqual(packet["panel"], ["openai-astra", "anthropic-opus"])
         for name in ["reviewer", *packet["panel"]]:
@@ -936,3 +938,202 @@ class CommandLine(CardCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AcceptanceEvidence(CardCase):
+    def accepted(self):
+        self.contract()
+        self.implement()
+        self.verified()
+        review.brief(self.card, self.repo)
+        self.report([])
+        review.settle(self.card, self.repo)
+
+    def imported(self, finding=None, **overrides):
+        payload = {"source": "https://github.com/example/repo/pull/1#discussion_1",
+                   "tree": gitio.snapshot(self.repo), "finding": finding or self.blocker(), **overrides}
+        path = self.root / "hosted.json"
+        path.write_text(json.dumps(payload))
+        return findings.import_finding(self.card, self.repo, path)
+
+    def test_hosted_import_is_idempotent_and_gates_settled_acceptance(self):
+        self.accepted()
+        old = self.card.load()["rounds"]
+        key = self.imported()["key"]
+        self.assertTrue(self.imported()["duplicate"])
+        self.assertEqual(self.card.load()["rounds"], old)
+        self.assertIn(key, self.decide("kanban_complete", "reviewer"))
+        self.assertEqual(self.confirm(key)["status"], "confirmed")
+        with self.assertRaisesRegex(CardError, "blocks acceptance"):
+            findings.resolve(self.card, self.repo, key, "deferred", "old defect", ticket="https://example.com/issues/2")
+        self.assertIn("finding return", self.decide("kanban_request_changes", "reviewer"))
+        self.assertEqual(findings.late_return(self.card, self.repo, "Confirmed contract violation")["number"], 1)
+        self.assertEqual(findings.late_return(self.card, self.repo, "Retry")["number"], 1)
+        self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
+
+    def test_hosted_comment_for_another_tree_is_refused(self):
+        self.accepted()
+        with self.assertRaisesRegex(CardError, "current reviewed tree"):
+            self.imported(tree="0" * 40)
+        self.assertEqual(self.card.load()["ledger"], {})
+
+    def test_baseline_followup_is_distinct_from_fix_and_requires_link(self):
+        self.accepted()
+        key = self.imported(self.blocker(**{"class": "discovery", "violates": "regression"}))["key"]
+        self.assertIsNotNone(self.decide("kanban_complete", "reviewer"))
+        with self.assertRaises(CardError):
+            findings.resolve(self.card, self.repo, key, "deferred", "Exists on base")
+        findings.resolve(self.card, self.repo, key, "deferred", "Outside this contract; exists on base", ticket="https://example.com/issues/2")
+        self.assertEqual(self.card.load()["ledger"][key]["status"], "deferred")
+        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
+
+    def test_low_contract_note_still_needs_a_disposition(self):
+        self.accepted()
+        key = self.imported(self.blocker(severity="low"))["key"]
+        self.assertIn(key, findings.pending(self.card.load()))
+        with self.assertRaisesRegex(CardError, "Only low non-contract"):
+            findings.resolve(self.card, self.repo, key, "not-planned", "It was low")
+        findings.resolve(self.card, self.repo, key, "resolved", "Source proves this was mistaken", "calc.py")
+        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
+
+    def test_confirmed_defect_cannot_be_closed_by_a_source_citation(self):
+        self.accepted()
+        key = self.imported()["key"]
+        self.confirm(key)
+        with self.assertRaisesRegex(CardError, "reproduction"):
+            findings.resolve(self.card, self.repo, key, "resolved", "Looks fixed", "calc.py")
+
+    def test_two_late_returns_do_not_authorize_contract_deferral(self):
+        self.accepted()
+        key = self.imported()["key"]
+        self.confirm(key)
+        with self.card.locked() as state:
+            state["late_returns"] = [{"tree": "a"}, {"tree": "b"}]
+        with self.assertRaisesRegex(CardError, "Two late returns"):
+            findings.late_return(self.card, self.repo, "third")
+        with self.assertRaisesRegex(CardError, "blocks acceptance"):
+            findings.resolve(self.card, self.repo, key, "deferred", "cap", ticket="https://example.com/issues/2")
+        self.assertIsNotNone(self.decide("kanban_complete", "reviewer"))
+
+    def test_unknown_check_is_rejected_even_in_legacy_mode(self):
+        self.contract({"criteria": ["works"], "scenarios": [{"id": "case", "operation": "run", "expected": "pass", "check": "typo"}]})
+        self.implement()
+        with self.assertRaisesRegex(CardError, "unknown check"):
+            self.verified()
+
+    def test_strict_coverage_requires_scenarios_for_each_criterion(self):
+        self.set_policy(require_scenario_evidence=True)
+        self.contract()
+        self.implement()
+        with self.assertRaisesRegex(CardError, "needs check or manual"):
+            self.verified()
+        self.contract({"criteria": ["add works", "div works"], "scenarios": [
+            {"id": "suite", "operation": "run suite", "expected": "pass", "check": "unit", "criteria": [1]}]})
+        with self.assertRaisesRegex(CardError, "Criteria \\[2\\]"):
+            self.verified()
+        self.contract({"criteria": ["add works", "div works"], "scenarios": [
+            {"id": "suite", "operation": "run suite", "expected": "pass", "check": "unit", "criteria": [1, 2]}]})
+        self.verified()
+
+    def test_manual_evidence_is_bound_to_candidate_at_completion(self):
+        self.set_policy(require_scenario_evidence=True)
+        proof = self.card.evidence("manual") / "result.json"
+        self.contract({"criteria": ["works"], "scenarios": [
+            {"id": "manual", "operation": "inspect", "expected": "works", "manual": str(proof), "criteria": [1]}]})
+        self.implement()
+        self.verified()
+        review.brief(self.card, self.repo)
+        self.report([])
+        review.settle(self.card, self.repo)
+        proof.write_text(json.dumps({"tree": "old", "scenario": "manual", "result": "pass", "observed": "worked"}))
+        self.assertIn("Manual proof", self.decide("kanban_complete", "reviewer"))
+        proof.write_text(json.dumps({"tree": gitio.snapshot(self.repo), "scenario": "manual", "result": "pass", "observed": "worked"}))
+        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
+
+    def test_pr_only_gate_requires_exact_ci_receipt(self):
+        self.accepted()
+        self.set_policy(delivery="pr", pr_ci={"repository": "example/repo", "branch": "main", "ci_workflow": "ci.yml"})
+        self.assertIn("check-pr", self.decide("kanban_complete", "reviewer"))
+        with patch.object(release, "require_pr_ci", return_value={} ) as check:
+            self.assertIsNone(gate.decide("kanban_complete", {"metadata": {"published_pr": "https://github.com/example/repo/pull/1"}}, lane="reviewer"))
+            self.assertEqual(check.call_args.args[-1], "https://github.com/example/repo/pull/1")
+
+    def test_cli_import_and_resolve(self):
+        self.accepted()
+        payload = {"source": "https://example.com/comment/1", "tree": gitio.snapshot(self.repo),
+                   "finding": self.blocker(**{"class": "discovery", "violates": "regression"})}
+        path = self.root / "comment.json"
+        path.write_text(json.dumps(payload))
+        from ai_dev import cli
+        with patch("sys.stdout"):
+            self.assertEqual(cli.main(["finding", "import", "--file", str(path)]), 0)
+            key = next(iter(self.card.load()["ledger"]))
+            self.assertEqual(cli.main(["finding", "resolve", key, "--outcome", "deferred", "--ticket", "https://example.com/2", "--reason", "baseline"]), 0)
+
+    def test_hosted_gap_can_be_assessed_after_acceptance(self):
+        self.accepted()
+        key = self.imported(self.blocker(kind="gap"))["key"]
+        review.assess(self.card, self.repo, key, "medium", "Criterion lacks a test", "test_calc.py")
+        self.assertIsNotNone(self.decide("kanban_complete", "reviewer"))
+        findings.resolve(self.card, self.repo, key, "resolved", "Reviewed evidence", "test_calc.py")
+        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
+
+    def test_unconfirmed_contract_findings_have_an_owner_exit(self):
+        self.accepted()
+        key = self.imported()["key"]
+        review.confirm(self.card, self.repo, key, cannot="No representative stand available")
+        self.assertIn(key, findings.pending(self.card.load()))
+        review.waive(self.card, key, "owner-message-1", "Explicitly accepted limitation")
+        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
+
+    def test_new_evidence_reopens_a_waived_mechanism(self):
+        self.accepted()
+        key = self.imported()["key"]
+        review.waive(self.card, key, "owner-message", "Accepted previous evidence")
+        self.imported(self.blocker(**{"class": "note", "actual": "New evidence"}))
+        self.assertEqual(self.card.load()["ledger"][key]["status"], "note")
+        self.assertIn(key, findings.pending(self.card.load()))
+
+    def test_old_verification_log_cannot_resolve_current_gap(self):
+        self.accepted()
+        old = self.card.load()["verifications"][-1]["checks"][0]["log"]
+        self.write("calc.py", (self.repo / "calc.py").read_text() + "\n# new candidate\n")
+        self.verified()
+        review.brief(self.card, self.repo)
+        self.report([])
+        key = self.imported(self.blocker(**{"class": "note"}))["key"]
+        with self.assertRaisesRegex(CardError, "not tied to this candidate"):
+            findings.resolve(self.card, self.repo, key, "resolved", "Claiming old proof", old)
+        current = self.card.load()["verifications"][-1]["checks"][0]["log"]
+        findings.resolve(self.card, self.repo, key, "resolved", "Current proof", current)
+
+    def test_late_return_authority_is_scoped_to_native_run(self):
+        self.accepted()
+        key = self.imported()["key"]
+        self.confirm(key)
+        findings.late_return(self.card, self.repo, "first")
+        with patch.dict(os.environ, {"HERMES_KANBAN_RUN_ID": "run-2"}):
+            self.assertIn("finding return", self.decide("kanban_request_changes", "reviewer"))
+            self.assertEqual(findings.late_return(self.card, self.repo, "second")["number"], 2)
+        with patch.dict(os.environ, {"HERMES_KANBAN_RUN_ID": "run-3"}):
+            with self.assertRaisesRegex(CardError, "Two late returns"):
+                findings.late_return(self.card, self.repo, "third")
+
+    def test_new_pre_review_check_invalidates_completion(self):
+        self.accepted()
+        self.set_policy(checks=[{"name": "unit", "argv": SUITE}, {"name": "new", "argv": [PY, "-c", "pass"]}])
+        self.assertIn("current pre-review", self.decide("kanban_complete", "reviewer"))
+        self.verified()
+        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
+
+    def test_demoted_late_gap_never_becomes_an_unsupported_status(self):
+        self.accepted()
+        key = self.imported(self.blocker(**{"class": "note"}))["key"]
+        findings.resolve(self.card, self.repo, key, "resolved", "Source evidence", "calc.py")
+        self.write("calc.py", (self.repo / "calc.py").read_text() + "\n# next candidate\n")
+        self.verified()
+        review.brief(self.card, self.repo)
+        self.report([])
+        self.imported(self.blocker(kind="gap"))
+        self.assertEqual(self.card.load()["ledger"][key]["status"], "note")
+        self.assertIn(key, findings.pending(self.card.load()))

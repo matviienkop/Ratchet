@@ -11,6 +11,7 @@ from .store import CardError, now, record
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]*")
 CHECK = "ai-dev-card release verify --pr https://github.com/OWNER/REPO/pull/NUMBER"
+CHECK_PR = "ai-dev-card release check-pr --pr https://github.com/OWNER/REPO/pull/NUMBER"
 
 
 def validate(rule):
@@ -33,6 +34,40 @@ def validate(rule):
     if not isinstance(arches, list) or not arches or not all(isinstance(a, str) and NAME.fullmatch(a) for a in arches):
         raise CardError("release.architectures needs at least one named package architecture.")
     return rule
+
+
+def validate_pr_ci(rule):
+    if (not isinstance(rule, dict) or set(rule) != {"repository", "branch", "ci_workflow"}
+            or not all(isinstance(value, str) and value.strip() for value in rule.values())
+            or not REPO.fullmatch(rule["repository"])
+            or not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml", rule["ci_workflow"])):
+        raise CardError("Configure pr_ci with repository (OWNER/REPO), branch and ci_workflow (FILE.yml), then run " + CHECK_PR)
+    return rule
+
+
+def ci_rule(contract, settings):
+    rule = selected(contract, settings)
+    if rule:
+        return rule
+    return settings.get("pr_ci") if settings.get("delivery") == "pr" else None
+
+
+def require_pr_ci(state, settings, tree, pr_url):
+    """Do not let a cached receipt accept a changed PR head or a newly failing CI rerun."""
+    rule = settings.get("pr_ci")
+    if settings.get("delivery") != "pr" or not rule:
+        return None
+    stored = state.get("premerge_receipt") or {}
+    if (not pr_url or stored.get("pr") != pr_url or stored.get("tree") != tree or stored.get("rule") != rule):
+        raise CardError("This PR needs current CI evidence. Run " + CHECK_PR
+                        + ", then call kanban_complete with metadata.published_pr set to that URL.")
+    try:
+        current = evidence(rule, pr_url, tree, before_merge=True)
+    except (KeyError, TypeError, AttributeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        raise CardError(f"PR CI could not be confirmed ({exc}). Retry " + CHECK_PR, code=2) from exc
+    if current["head"] != stored.get("head") or current["ci"] != stored.get("ci"):
+        raise CardError("The PR head or CI run changed after verification. Run " + CHECK_PR)
+    return current
 
 
 def selected(contract, settings):
@@ -103,7 +138,7 @@ def evidence(rule, pr_url, tree, before_merge=False, premerge=None):
     repository = rule["repository"]
     if before_merge:
         if not rule.get("ci_workflow"):
-            raise CardError("check-pr requires an explicit release.ci_workflow.")
+            raise CardError("Configure release.ci_workflow or pr_ci.ci_workflow before running " + CHECK_PR)
         if pr["merged"] or pr.get("state") != "open":
             raise CardError("Pre-merge CI verification requires the reviewed PR to be open.")
         ci = action_run(rule, head, number, pr)
@@ -157,21 +192,24 @@ def evidence(rule, pr_url, tree, before_merge=False, premerge=None):
 
 
 def verify_release(card, workspace, pr_url, before_merge=False):
-    from . import review, verify
+    from . import review, verify, findings
     state = card.load()
     _, settings, tree = verify.prepare(state, workspace)
-    rule = selected(state["contract"], settings)
+    rule = ci_rule(state["contract"], settings) if before_merge else selected(state["contract"], settings)
     if not rule:
-        raise CardError("No package delivery contract is configured for this card.")
+        command = CHECK_PR if before_merge else CHECK
+        raise CardError("Configure the repository delivery policy before running " + command)
     def ready(snapshot):
         rounds = snapshot["rounds"]
         return (rounds and rounds[-1]["tree"] == tree and rounds[-1]["outcome"] == "accept"
                 and not review.independent_evidence(snapshot, settings["review"], rounds[-1])
+                and not findings.completion_issue(snapshot)
                 and verify.passing_receipt(snapshot, settings, tree, "pre_review")
                 and (not verify.checks_for(settings, snapshot["contract"], "post_review")
                      or verify.passing_receipt(snapshot, settings, tree, "post_review")))
     if not ready(state):
         raise CardError("Complete independent review and the contracted checks before verifying publication.")
+    verify.manual_evidence(card, state, tree)
     try:
         receipt = evidence(rule, pr_url, tree, before_merge, state.get("premerge_receipt"))
     except (KeyError, TypeError, AttributeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
@@ -179,7 +217,8 @@ def verify_release(card, workspace, pr_url, before_merge=False):
     with card.locked() as state:
         _, current_settings, current_tree = verify.prepare(state, workspace)
         if (current_tree != tree or current_settings != settings or not ready(state)
-                or selected(state["contract"], current_settings) != rule):
+                or (ci_rule(state["contract"], current_settings) if before_merge
+                    else selected(state["contract"], current_settings)) != rule):
             raise CardError("The card changed while publication was checked. Retry " + CHECK)
         state["premerge_receipt" if before_merge else "release_receipt"] = {**receipt, "rule": rule}
         record(state, "release.ci-passed" if before_merge else "release.verified", **receipt)

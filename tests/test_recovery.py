@@ -33,7 +33,7 @@ class Recovery(CardCase):
         self.assertEqual(recovery.recover(self.card, self.repo, "verification")[0]["action"], "handoff")
 
     def test_quota_wait_retries_only_after_event_and_deadline(self):
-        self.policy.write_text(json.dumps({"defaults":{"target_branch":"main","checks":[{"name":"unit","argv":SUITE}]}}))
+        self.policy.write_text(json.dumps({"defaults":{"require_scenario_evidence":False,"target_branch":"main","checks":[{"name":"unit","argv":SUITE}]}}))
         self.contract()
         self.implement()
         self.verified()

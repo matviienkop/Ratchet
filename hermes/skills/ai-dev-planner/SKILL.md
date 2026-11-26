@@ -97,3 +97,11 @@ Use one Slack thread per card. In Telegram, start a fresh owner discussion with 
 Immediately after card creation, before dispatch, run `ai-dev-card --board BOARD --card CARD bind` in the originating gateway session. Use the real card and board IDs. If the terminal lacks gateway routing metadata, bind reads the existing native subscription. If Hermes did not create one, inspect `hermes kanban --board BOARD notify-list CARD --json` and restore the originating thread with native `notify-subscribe` using its actual platform, chat and thread IDs. Confirm the subscription before reporting delivery. The worker sessions and the owner conversation have separate lifetimes.
 
 For progress read `ai-dev-card --board BOARD --card CARD history --limit 8`. For investigation add `--details --native` to link verification evidence, workers, board comments and decisions. In chat report the finished stage, its result, the next worker and what it received.
+
+## Preserving acceptance obligations
+
+Give every criterion a linked scenario using `criteria: [N]` and `check` or `manual` evidence. Consult `docs/operations.md` for the contract fields. Check that the selected command actually runs the intended tests on the base. For a replacement card run `ai-dev-card contract inherit --from-card ID --from-board BOARD` before setting a new contract. When rewriting an implementation, preserve its scenarios and confirmed reproductions; a closed ticket whose fix only reached a discarded branch is not evidence for the replacement.
+
+Before retrying a merge, reread the PR comments and refresh exact-head CI evidence. Import actionable hosted findings through `ai-dev-card finding import --file FILE`. Follow the disposition and two-return rules in `docs/review-protocol.md`. A follow-up needs source links, a reproduction or clearly marked hypothesis, a scope justification, priority and an acceptance criterion. Reuse an existing ticket for the same cause. Creating a ticket does not authorize unrelated implementation or satisfy a criterion that remains broken.
+
+In the final summary separate what was built, published, installed and exercised. Cite the actual fixing commit in the target branch and the current evidence. Keep platform and manual-test limitations explicit.

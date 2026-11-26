@@ -18,7 +18,7 @@ from .store import CardError, now, record
 CLASSES = ("blocker", "note", "discovery")
 KINDS = ("defect", "gap")
 BLOCKING = ("confirmed", "gap")
-SETTLED = ("fixed", "disproved", "unconfirmed", "waived", "resolved", "note", "discovery")
+SETTLED = ("fixed", "disproved", "unconfirmed", "waived", "resolved", "deferred", "note", "discovery")
 OPEN_OUTCOMES = (None, "owner")
 FIELDS = ("title", "violates", "location", "trigger", "expected", "actual", "mechanism", "reproduction")
 
@@ -190,7 +190,7 @@ def brief(card, worktree):
                    "mode": "delta" if previous else "full", "started": now(), "reports": {}, "panel": {},
                    "previous_commit": previous["commit"] if previous else None, "rechecks": [], "outcome": None}
             state["rounds"].append(rnd)
-            if previous:
+            if previous or state.get("inherited_from"):
                 _recheck(card, state, rnd, worktree, settings)
             record(state, "review.opened", round=rnd["n"], tree=tree, mode=rnd["mode"])
         rnd["panel_rule"] = panel_rule
@@ -238,6 +238,7 @@ def _recheck(card, state, rnd, worktree, settings):
                              settings["review"]["confirm_timeout"])
         fixed = outcome["klass"] == "pass"
         if fixed:
+            entry["disposition"] = {"outcome": "fixed", "tree": rnd["tree"], "evidence": outcome, "at": now()}
             entry["status"] = "fixed"
             entry["history"].append({"round": rnd["n"], "status": "fixed", "by": "recheck",
                                      "reason": "Its reproduction passes on the new candidate."})
@@ -278,10 +279,13 @@ def _accept_report(card, state, rnd, reviewer, report, model=None):
 def confirm(card, worktree, key, files=(), argv=(), timeout=None, cannot=None):
     """Run a reproduction on the candidate and on the base, and classify the finding by what happens."""
     with card.locked() as state:
-        rnd = _open_round(state)
-        if rnd["outcome"] is not None:
-            raise CardError("This round waits for the owner. Findings change only through the owner's decision.")
-        worktree, settings, _ = verify.prepare(state, worktree)
+        rnd = state["rounds"][-1] if state["rounds"] else None
+        entry = state["ledger"].get(key)
+        if not rnd or (rnd["outcome"] is not None and not (rnd["outcome"] == "accept" and entry and entry.get("sources"))):
+            raise CardError("Open review with ai-dev-card review brief; at the round cap use ai-dev-card recover review.")
+        worktree, settings, tree = verify.prepare(state, worktree)
+        if tree != rnd["tree"]:
+            raise CardError("Candidate changed. Run ai-dev-card verify and ai-dev-card review brief before confirmation.")
         entry = state["ledger"].get(key)
         if not entry or entry["status"] != "candidate":
             current = f"its status is {entry['status']}" if entry else "no such key"
@@ -326,9 +330,14 @@ def confirm(card, worktree, key, files=(), argv=(), timeout=None, cannot=None):
             else:
                 result = "unconfirmed"
             proof = {"tree": rnd["tree"], "result": result, "argv": list(argv), "files": stored,
-                     "candidate": candidate, "base": base, "at": now()}
+                     "candidate": candidate, "base": base, "at": now(),
+                     "files_sha256": {name: verify.file_digest(path) for name, path in stored.items()}}
         entry.setdefault("attempts", []).append({"round": rnd["n"], "result": result})
         entry["confirm"], entry["status"] = proof, result
+        if result == "disproved":
+            entry["disposition"] = {"outcome": "disproved", "tree": rnd["tree"], "evidence": proof, "at": now()}
+        elif result in ("confirmed", "discovery", "unconfirmed"):
+            entry.pop("disposition", None)
         entry["history"].append({"round": rnd["n"], "status": result, "by": "confirm", "reason": proof.get("reason")})
         record(state, "finding." + result, key=key, round=rnd["n"])
         return {"key": key, "status": result, "proof": proof}
@@ -338,9 +347,11 @@ def assess(card, worktree, key, level, impact, evidence):
     if level not in severity.LEVELS or not impact or not impact.strip() or not evidence:
         raise CardError("Run ai-dev-card finding assess KEY --severity LEVEL --impact TEXT --evidence PATH.")
     with card.locked() as state:
-        rnd = _open_round(state)
+        rnd = state["rounds"][-1] if state["rounds"] else None
+        entry = state["ledger"].get(key)
         worktree, settings, tree = verify.prepare(state, worktree)
-        if rnd["outcome"] is not None or tree != rnd["tree"]:
+        late = bool(rnd and rnd["outcome"] == "accept" and entry and entry.get("sources"))
+        if not rnd or (rnd["outcome"] is not None and not late) or tree != rnd["tree"]:
             raise CardError("Open the review round for this candidate with ai-dev-card review brief.")
         if settings["review"]["panel_required"] and owed(state, settings["review"], rnd):
             raise CardError("Collect the reviewer reports with ai-dev-card review panel before reconciling severity.")
@@ -439,11 +450,6 @@ def settle(card, worktree):
                 "Confirm each blocker candidate once before settling: " + ", ".join(pending) + ". Use "
                 "`ai-dev-card confirm --finding KEY --file TEST:REPO_PATH -- COMMAND`, or "
                 "`ai-dev-card confirm --finding KEY --cannot-reproduce REASON`.", code=2)
-        for entry in ledger.values():
-            if entry["status"] == "gap" and entry.get("raised_round", 0) < number:
-                entry["status"] = "resolved"
-                entry["history"].append({"round": number, "status": "resolved", "by": "settle",
-                                         "reason": "No reviewer raised it again."})
         blocking = sorted(k for k, e in ledger.items() if e["status"] in BLOCKING)
         limit = review["max_rounds"] + state["extra_rounds"]
         outcome = "accept" if not blocking else ("changes" if number < limit else "owner")
@@ -457,6 +463,7 @@ def settle(card, worktree):
 
 
 def _result(state, settings, rnd, tree):
+    from . import findings
     ledger = state["ledger"]
     post_due = (bool(verify.checks_for(settings, state["contract"], "post_review"))
                 and not verify.passing_receipt(state, settings, tree, "post_review"))
@@ -471,6 +478,12 @@ def _result(state, settings, rnd, tree):
         else:
             step = ("Follow the authorized merge and publish procedure. Wait for the package in channel "
                     + rule["channel"] + ", then run " + release.CHECK)
+    if rnd["outcome"] == "accept":
+        issue = findings.completion_issue(state)
+        if issue:
+            step = issue
+        elif not rule and settings["delivery"] == "pr" and settings.get("pr_ci"):
+            step = "Run ai-dev-card release check-pr --pr URL, then kanban_complete with metadata.published_pr=URL."
     return {"round": rnd["n"], "outcome": rnd["outcome"], "blocking": rnd["blocking"], "fix_brief": rnd["fix_brief"],
             "findings": review_summary.findings(state, rnd), "provider_diversity": review_summary.diversity(rnd),
             "notes": sorted(k for k, e in ledger.items() if e["status"] in ("note", "unconfirmed")),
@@ -540,8 +553,11 @@ def _fix_brief(state, rnd, blocking, outcome, limit):
 def waive(card, key, owner_ref, reason):
     with card.locked() as state:
         entry = state["ledger"].get(key)
-        if not entry or entry["status"] not in (*BLOCKING, "candidate"):
+        if not entry or entry["status"] not in (*BLOCKING, "candidate", "unconfirmed", "note", "discovery"):
             raise CardError(f"{key} is not an open blocker.")
+        if not owner_ref or not reason:
+            raise CardError("Run ai-dev-card finding waive KEY --owner-ref MESSAGE --reason TEXT.")
+        entry["disposition"] = {"outcome": "waived", "owner_ref": owner_ref, "reason": reason, "at": now()}
         entry["status"] = "waived"
         entry["history"].append({"round": len(state["rounds"]), "status": "waived", "by": owner_ref, "reason": reason})
         record(state, "finding.waived", key=key, owner_ref=owner_ref, reason=reason)

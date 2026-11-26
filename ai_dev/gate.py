@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from . import gitio, policy as policies, release, review, verify
+from . import gitio, policy as policies, release, review, verify, findings
 from .store import Card, CardError, identity
 
 ROLES = ("planner", "coder", "reviewer")
@@ -48,7 +48,10 @@ def _card(env):
         raise CardError("This card has no workspace. Coding cards need a worktree workspace.")
     workspace = gitio.repo_root(workspace)
     settings = policies.load(repo=gitio.main_repo(workspace), origin=gitio.origin(workspace))
-    return Card(board, card).load(), settings, gitio.snapshot(workspace)
+    state = Card(board, card).load()
+    if state["contract"]:
+        verify.scenario_evidence(state["contract"], settings)
+    return state, settings, gitio.snapshot(workspace)
 
 
 def _attribution(env, state):
@@ -103,6 +106,11 @@ def _reviewer(tool_name, env, args):
         if outcome == "changes" or (outcome == "accept" and post_defect):
             return None
         if outcome == "accept":
+            late = any(e["status"] == "confirmed" and e.get("sources") for e in state["ledger"].values())
+            if late:
+                if any(r["tree"] == tree and r.get("run") == (env.get("HERMES_KANBAN_RUN_ID") or env.get("HERMES_SESSION_ID")) for r in state.get("late_returns", [])):
+                    return None
+                return "ai-dev gate: record the bounded late return with ai-dev-card finding return --reason TEXT."
             return "ai-dev gate: the round settled as accept, no blocker is confirmed. Call kanban_complete."
         return "ai-dev gate: the review round cap is reached. Run ai-dev-card recover review."
     if outcome != "accept":
@@ -110,6 +118,13 @@ def _reviewer(tool_name, env, args):
                 + ("Call kanban_request_changes with the fix brief." if outcome == "changes"
                    else "Run ai-dev-card recover review for the next action."))
     if post_passed:
+        if not verify.passing_receipt(state, settings, tree, "pre_review"):
+            return "ai-dev gate: current pre-review checks have no passing receipt. Run ai-dev-card verify."
+        issue = findings.completion_issue(state)
+        if issue:
+            return "ai-dev gate: " + issue
+        board, task = identity(env=env)
+        verify.manual_evidence(Card(board, task), state, tree)
         rule = release.selected(state["contract"], settings)
         if rule:
             receipt = state.get("release_receipt") or {}
@@ -118,6 +133,8 @@ def _reviewer(tool_name, env, args):
                         "and publish procedure, then run " + release.CHECK)
             if (args.get("metadata") or {}).get("published_pr") != receipt["pr"]:
                 return "ai-dev gate: call kanban_complete with metadata.published_pr=" + receipt["pr"]
+        elif settings["delivery"] == "pr" and settings.get("pr_ci"):
+            release.require_pr_ci(state, settings, tree, (args.get("metadata") or {}).get("published_pr"))
         return None
     if post_defect:
         return ("ai-dev gate: a post-review check failed on this change. Call kanban_request_changes(reason=...) "
