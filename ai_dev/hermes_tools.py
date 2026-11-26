@@ -60,8 +60,12 @@ def inspect_card(args, *, plugin_dir=None, lane=None, **_):
         output = json.loads(result.stdout)
     except ValueError:
         output = result.stdout
-    return json.dumps(sanitize({"exit_code": result.returncode, "result": output,
-                                "error": result.stderr.strip() or None}), ensure_ascii=False)
+    response = {"exit_code": result.returncode, "result": output}
+    if result.returncode:
+        response["error"] = result.stderr.strip() or "Card inspection failed. Run ai-dev-card doctor."
+    elif result.stderr.strip():
+        response["warnings"] = result.stderr.strip()
+    return json.dumps(sanitize(response), ensure_ascii=False)
 
 
 def register(ctx, *, plugin_dir=None, lane=None):
