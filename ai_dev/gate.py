@@ -95,16 +95,19 @@ def _coder(tool_name, env):
     if not state["contract"]:
         return ("ai-dev gate: this card has no contract. Run `ai-dev-card contract set --file FILE`, then "
                 "`ai-dev-card verify`.")
+    issue = review.repair_tree_issue(state, tree)
+    if issue:
+        return "ai-dev gate: " + issue
     for kind in ("verification", "review"):
         issue = recovery.correction_issue(state, settings, kind)
         if issue:
             return "ai-dev gate: " + issue
     rnd = state["rounds"][-1] if state["rounds"] else {}
-    if rnd.get("tree") == tree and rnd.get("outcome") in ("changes", "owner"):
+    if rnd.get("tree") == tree and rnd.get("outcome") in ("changes", "owner") and not review.pending_supersession(state):
         return "ai-dev gate: this candidate already failed review. Apply the diagnosed correction and run ai-dev-card verify."
     if verify.passing_receipt(state, settings, tree, "pre_review"):
         return _attribution(env, state)
-    last = verify.last_for(state, tree, "pre_review")
+    last = verify.last_for(state, tree, "pre_review", settings)
     if last and not last["passed"]:
         return (f"ai-dev gate: the last verification of this tree ended as {last['result']}. Run "
                 "`ai-dev-card recover verification` and complete the diagnosis before retrying; "
@@ -117,6 +120,9 @@ def _reviewer(tool_name, env, args):
     if tool_name == "kanban_request_review":
         return "ai-dev gate: a reviewer ends with kanban_complete, kanban_request_changes or kanban_block."
     state, settings, tree = _card(env)
+    if review.pending_supersession(state):
+        return ("ai-dev gate: the historical review verdict is not actionable after evidence supersession. "
+                "Run `ai-dev-card verify`, then open a fresh round with `ai-dev-card review brief`.")
     rnd = state["rounds"][-1] if state["rounds"] else None
     if not rnd or rnd["tree"] != tree or rnd["outcome"] is None:
         return ("ai-dev gate: this tree has no settled review round. Run `ai-dev-card review brief`, run "
@@ -127,8 +133,8 @@ def _reviewer(tool_name, env, args):
     outcome = rnd["outcome"]
     post_checks = verify.checks_for(settings, state["contract"], "post_review")
     post_passed = not post_checks or verify.passing_receipt(state, settings, tree, "post_review")
-    post_last = verify.last_for(state, tree, "post_review") if post_checks else None
-    post_defect = bool(post_last and post_last["result"] == "defect" and not post_passed)
+    post_last = verify.last_for(state, tree, "post_review", settings) if post_checks else None
+    post_defect = post_checks and verify.post_review_defect(state, settings, tree)
     if tool_name == "kanban_request_changes":
         for kind in ("verification", "review"):
             issue = recovery.correction_issue(state, settings, kind)

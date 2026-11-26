@@ -137,6 +137,10 @@ def run_review(args):
         return result, 0
     if args.action == "settle":
         return review.settle(card, _workspace(args)), 0
+    if args.action == "supersede-evidence":
+        result = review.supersede_evidence(card, _workspace(args), args.finding, args.round_number, args.tree,
+                                           args.old_sha256, args.test, args.owner_ref, args.reason)
+        return result, 0 if result["status"] == "fixed" else 2
     if args.action == "fix-brief":
         return review.fix_brief(card), 0
     return review.extend(card, args.owner_ref, rounds=args.rounds, failures=args.failures), 0
@@ -238,12 +242,18 @@ def main(argv=None):
     sub.set_defaults(run=lambda args: (release.verify_release(_card(args), _workspace(args), args.pr, before_merge=args.action == "check-pr"), 0))
 
     sub = commands.add_parser("review", help="Review rounds.")
-    sub.add_argument("action", choices=("brief", "submit", "panel", "settle", "fix-brief", "extend"))
+    sub.add_argument("action", choices=("brief", "submit", "panel", "settle", "fix-brief", "extend", "supersede-evidence"))
     sub.add_argument("--report")
     sub.add_argument("--reviewer")
     sub.add_argument("--rounds", type=int, default=0)
     sub.add_argument("--failures", type=int, default=0, help="Extra failed verifications the owner allows.")
     sub.add_argument("--owner-ref")
+    sub.add_argument("--finding")
+    sub.add_argument("--round", dest="round_number", type=int)
+    sub.add_argument("--tree")
+    sub.add_argument("--old-sha256")
+    sub.add_argument("--test", help="Owner-approved, tracked Go test name for an overlay-free rerun.")
+    sub.add_argument("--reason")
     sub.set_defaults(run=run_review)
 
     sub = commands.add_parser("confirm", help="Reproduce a blocker on the candidate and on the base.")

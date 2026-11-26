@@ -14,7 +14,7 @@ KINDS = ("verification", "review", "provider")
 def trigger(state, settings, kind):
     rnd = state["rounds"][-1] if state["rounds"] else {}
     if kind != "provider":
-        return correction_facts(state, kind)
+        return correction_facts(state, kind, settings)
     if kind == "provider" and settings["review"]["panel_required"] and rnd.get("outcome") is None:
         from .review import owed
         failed = {name: r["reason"] for name, r in rnd.get("panel", {}).items() if r.get("status") == "unavailable"}
@@ -56,14 +56,24 @@ def progressed(state, kind, before, current):
                    for k in old) for r in state["rounds"])
 
 
-def correction_facts(state, kind):
+def correction_facts(state, kind, settings):
     if kind == "verification":
-        last = state["verifications"][-1] if state["verifications"] else {}
+        from . import verify
+        # The gate and recovery must diagnose the same accepted round's post-review defect,
+        # even if a later pre-review check passed. Inapplicable receipts stay in history.
+        rnd = state["rounds"][-1] if state["rounds"] else {}
+        post = (verify.post_review_defect(state, settings, rnd["tree"])
+                if rnd.get("outcome") == "accept" and verify.supersession_for(state, rnd["tree"]) else None)
+        last = post or next((v for v in reversed(state["verifications"])
+                             if verify.applicable_receipt(state, settings, v)), {})
         if last.get("result") == "defect":
             return {"receipt": last["id"], "tree": last["tree"],
                     "failed": [{"check": c["name"], "problem": c["problem"], "log": c["log"]}
                                for c in last["checks"] if c["klass"] != "pass"]}
     if kind == "review" and state["rounds"]:
+        from .review import pending_supersession
+        if pending_supersession(state):
+            return None
         rnd = state["rounds"][-1]
         if rnd.get("outcome") in ("changes", "owner"):
             return {"round": rnd["n"], "tree": rnd["tree"], "blocking": rnd["blocking"], "brief": rnd["fix_brief"]}
@@ -88,7 +98,7 @@ def attempt_limit(state, settings):
 
 
 def correction_issue(state, settings, kind):
-    facts = correction_facts(state, kind)
+    facts = correction_facts(state, kind, settings)
     if not facts:
         return None
     entry = state.get("diagnoses", {}).get(correction_key(kind, facts), {})
@@ -112,7 +122,7 @@ def require_diagnosis(state, settings):
 
 def recover_correction(card, settings, kind, child):
     snapshot = card.load()
-    facts = correction_facts(snapshot, kind)
+    facts = correction_facts(snapshot, kind, settings)
     if not facts:
         return {"action": "none", "next": "No failed attempt at this stage. Run ai-dev-card status."}, 0
     key = correction_key(kind, facts)
@@ -121,7 +131,7 @@ def recover_correction(card, settings, kind, child):
         raise CardError(f"Run ai-dev-card recover {kind} first and dispatch the returned diagnosis.")
     evidence = confirmed_child(card, child, old["marker"]) if child else None
     with card.locked() as state:
-        if correction_facts(state, kind) != facts:
+        if correction_facts(state, kind, settings) != facts:
             raise CardError(f"The failed attempt changed during diagnosis validation. Run ai-dev-card recover {kind} again.")
         entries = state.setdefault("diagnoses", {})
         entry = entries.get(key)
