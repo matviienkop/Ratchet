@@ -21,7 +21,7 @@ The script asks GitHub for the newest Hermes release, checks that `nousresearch/
 
 ## Published image
 
-The workflow `.github/workflows/image.yml` builds on GitHub and publishes to the GitHub Container Registry as `ghcr.io/OWNER/ratchet-bot`.
+The workflow `.github/workflows/image.yml` builds on GitHub and publishes to the GitHub Container Registry as `ghcr.io/OWNER/ratchet-bot`. A pull request gets the unit tests from `.github/workflows/tests.yml`; it builds the image, without publishing, only when it changes `docker/`, `.dockerignore` or the workflow itself. Every push to `main` that changes the code builds and publishes.
 
 | Event | What happens |
 | --- | --- |
