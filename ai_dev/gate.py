@@ -118,6 +118,8 @@ def _reviewer(tool_name, env, args):
                 + ("Call kanban_request_changes with the fix brief." if outcome == "changes"
                    else "Run ai-dev-card recover review for the next action."))
     if post_passed:
+        if not verify.passing_receipt(state, settings, tree, "pre_review"):
+            return "ai-dev gate: current pre-review checks have no passing receipt. Run ai-dev-card verify."
         issue = findings.completion_issue(state)
         if issue:
             return "ai-dev gate: " + issue

@@ -1118,3 +1118,22 @@ class AcceptanceEvidence(CardCase):
         with patch.dict(os.environ, {"HERMES_KANBAN_RUN_ID": "run-3"}):
             with self.assertRaisesRegex(CardError, "Two late returns"):
                 findings.late_return(self.card, self.repo, "third")
+
+    def test_new_pre_review_check_invalidates_completion(self):
+        self.accepted()
+        self.set_policy(checks=[{"name": "unit", "argv": SUITE}, {"name": "new", "argv": [PY, "-c", "pass"]}])
+        self.assertIn("current pre-review", self.decide("kanban_complete", "reviewer"))
+        self.verified()
+        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
+
+    def test_demoted_late_gap_never_becomes_an_unsupported_status(self):
+        self.accepted()
+        key = self.imported(self.blocker(**{"class": "note"}))["key"]
+        findings.resolve(self.card, self.repo, key, "resolved", "Source evidence", "calc.py")
+        self.write("calc.py", (self.repo / "calc.py").read_text() + "\n# next candidate\n")
+        self.verified()
+        review.brief(self.card, self.repo)
+        self.report([])
+        self.imported(self.blocker(kind="gap"))
+        self.assertEqual(self.card.load()["ledger"][key]["status"], "note")
+        self.assertIn(key, findings.pending(self.card.load()))
