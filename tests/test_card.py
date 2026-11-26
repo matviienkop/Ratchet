@@ -1316,3 +1316,120 @@ class DiagnosedAttempts(CardCase):
         self.assertEqual(self.diagnose()["action"], "handoff")
         findings.resolve(self.card, self.repo, key, "deferred", "Diagnosed non-contract work", ticket="https://example.org/issues/1")
         self.assertEqual(self.card.load()["ledger"][key]["status"], "deferred")
+
+
+class ProjectPreflight(CardCase):
+    def configured(self, **options):
+        self.set_policy(preflight={"checks": [{"name": "unit", "argv": SUITE,
+                                              "tests_pattern": r"Ran (?P<count>\d+) tests?"}], **options})
+        self.contract()
+
+    def test_base_receipt_precedes_changes_and_gates_verification(self):
+        from ai_dev import preflight
+        self.configured()
+        self.assertIn('preflight', self.decide('kanban_request_review', 'coder'))
+        receipt, code = preflight.run(self.card, self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(receipt['before_candidate_changes'])
+        self.assertEqual(receipt['checks'][0]['test_count'], 1)
+        self.implement()
+        self.verified()
+        self.assertIsNone(self.decide('kanban_request_review', 'coder'))
+        self.assertEqual(preflight.run(self.card, self.repo)[0]['id'], receipt['id'])
+
+    def test_missing_receipt_blocks_even_existing_verification(self):
+        self.contract()
+        self.implement()
+        self.verified()
+        self.set_policy(preflight={"checks": [{"name": "unit", "argv": SUITE,
+                                              "tests_pattern": r"Ran (?P<count>\d+) tests?"}]})
+        self.assertIn('preflight', self.decide('kanban_request_review', 'coder'))
+        with self.assertRaisesRegex(CardError, 'preflight'):
+            verify.verify(self.card, self.repo)
+
+    def test_candidate_changes_do_not_contaminate_baseline(self):
+        from ai_dev import preflight
+        self.configured()
+        self.write('calc.py', 'def add(a, b): return 0\n')
+        candidate = gitio.snapshot(self.repo)
+        receipt, code = preflight.run(self.card, self.repo)
+        self.assertEqual(code, 0)
+        self.assertFalse(receipt['before_candidate_changes'])
+        self.assertEqual(gitio.snapshot(self.repo), candidate)
+        self.assertEqual(self.card.load()['counters'], {'defect': 0, 'environment': 0})
+
+    def test_zero_tests_cannot_be_acknowledged(self):
+        from ai_dev import preflight
+        self.set_policy(preflight={'checks': [{'name': 'empty', 'argv': [PY, '-c', "print('Ran 0 tests')"],
+                                             'tests_pattern': r'Ran (?P<count>\d+) tests?'}]})
+        self.contract()
+        receipt, code = preflight.run(self.card, self.repo)
+        self.assertEqual(code, 2)
+        self.assertEqual(receipt['checks'][0]['klass'], 'environment')
+        with self.assertRaisesRegex(CardError, 'Only executed'):
+            preflight.acknowledge(self.card, self.repo, 'empty', 'irrelevant', 'reference')
+
+    def test_baseline_defect_needs_assessment_and_does_not_spend_attempt(self):
+        from ai_dev import preflight
+        self.write('calc.py', 'def add(a, b): return 0\n')
+        self.git('add', 'calc.py')
+        self.git('commit', '-qm', 'Existing defect')
+        self.git('branch', '-f', 'main', 'HEAD')
+        self.configured()
+        receipt, code = preflight.run(self.card, self.repo)
+        self.assertEqual(code, 2)
+        self.assertEqual(receipt['checks'][0]['klass'], 'baseline_failure')
+        receipt, code = preflight.acknowledge(self.card, self.repo, 'unit', 'Existing add defect; scoped separately', 'base log')
+        self.assertEqual(code, 0)
+        self.assertEqual(receipt['checks'][0]['klass'], 'baseline_failure')
+        self.assertEqual(self.card.load().get('attempt', 1), 1)
+        self.assertEqual(self.card.load()['counters']['defect'], 0)
+        receipt, code = preflight.run(self.card, self.repo, rerun=True)
+        self.assertEqual(code, 2)
+        self.assertNotIn('assessment', receipt['checks'][0])
+
+    def test_changed_policy_invalidates_receipt(self):
+        from ai_dev import preflight
+        self.configured()
+        preflight.run(self.card, self.repo)
+        settings = json.loads(self.policy.read_text())
+        settings['defaults']['preflight']['checks'][0]['timeout'] = 5
+        self.policy.write_text(json.dumps(settings))
+        self.assertIn('stale', self.decide('kanban_request_review', 'coder'))
+
+    def test_missing_executable_and_modified_source_are_environment_failures(self):
+        from ai_dev import preflight
+        for argv in (['/nonexistent/ratchet-tool'], [PY, '-c', "open('calc.py','w').write('changed')"]):
+            self.set_policy(preflight={'checks': [{'name':'readiness', 'argv':argv}], 'no_tests_reason':'Documentation-only fixture'})
+            self.contract()
+            receipt, code = preflight.run(self.card, self.repo, rerun=True)
+            self.assertEqual(code, 2)
+            self.assertTrue(any(c['klass']=='environment' for c in receipt['checks']))
+            self.assertIn('def add', (self.repo/'calc.py').read_text())
+
+    def test_project_without_tests_needs_explicit_operator_reason(self):
+        from ai_dev import preflight
+        with self.assertRaisesRegex(CardError, 'tests_pattern'):
+            preflight.validate({'checks':[{'name':'syntax','argv':[PY,'--version']}]})
+        self.set_policy(preflight={'checks':[{'name':'syntax','argv':[PY,'--version']}],
+                                   'no_tests_reason':'Documentation project; syntax check is the applicable validation'})
+        self.contract()
+        self.assertEqual(preflight.run(self.card, self.repo)[1], 0)
+
+    def test_stand_receives_base_without_candidate_patch_and_restores_power(self):
+        from ai_dev import preflight, stands
+        self.configured()
+        self.set_policy(project='test', preflight={'checks':[{'name':'unit','argv':SUITE,'stand':'vm',
+                                                            'tests_pattern':r'Ran (?P<count>\d+) tests?'}]})
+        self.implement()
+        driver=self.root/'vm'
+        def execute(argv, cwd, log, timeout):
+            log.write_text('Ran 1 test\n')
+            return 0, None, 'pass', 1
+        from contextlib import nullcontext
+        with patch.object(stands,'registered',return_value=driver), patch.object(stands,'exclusive',return_value=nullcontext()), \
+             patch.object(stands,'call',side_effect=[(0,'stopped'),(0,'')]) as call, \
+             patch.object(stands,'prepare',return_value=None) as prepare, patch.object(verify,'run',side_effect=execute):
+            self.assertEqual(preflight.run(self.card,self.repo)[1],0)
+        self.assertEqual(prepare.call_args.args[3],b'')
+        self.assertEqual(call.call_args.args,(driver,'shutdown'))

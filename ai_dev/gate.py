@@ -51,6 +51,10 @@ def _card(env):
     state = Card(board, card).load()
     if state["contract"]:
         verify.scenario_evidence(state["contract"], settings)
+        from .preflight import issue
+        problem = issue(state, settings)
+        if problem:
+            raise CardError(problem)
     return state, settings, gitio.snapshot(workspace)
 
 

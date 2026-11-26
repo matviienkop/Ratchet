@@ -19,6 +19,7 @@ The export contains `schema_version`, `generated_at`, `window_start`, `retention
 | `card` | Current title/status, native dependency IDs, tracker references, attempt, coverage and collection-time provenance |
 | `native_event`, `native_run` | Native transitions, reasons, run outcome, session and elapsed wall time |
 | `event`, `gate` | Ratchet decisions, handoffs, diagnosis/attempt events and blocked gate decisions |
+| `preflight` | Base environment readiness, discovered test counts, baseline failure assessments and timing |
 | `verification` | Result, stage, tree, check classes and durations, overall timing and evidence hashes |
 | `review`, `panel_attempt` | Round result, reviewer/model, report finding keys, successful and failed panel timings and available usage |
 | `finding` | Mechanism, severity, reviewers, ratings, reproduction result, triage size/decision, disposition and follow-up URL; history limited to the window |

@@ -16,15 +16,16 @@ Follow the `next` line. The board tools `kanban_request_review`, `kanban_complet
 ## Implementer
 
 1. Read the card (`kanban_show`) and `ai-dev-card contract show`. If the card has no contract, write `contract.json` from the card body and run `ai-dev-card contract set --file contract.json`.
-2. If `status` says the reviewer asked for changes, read `ai-dev-card review fix-brief`. Fix every item under "Must fix". Add each listed reproduction test to the patch at the given path.
-3. Work only inside the workspace. Keep the change inside the contract. Triage a discovered baseline defect by severity, size and risk: a small suitable fix can join this card after the planner adds its scenario and checks; larger or riskier work goes to a follow-up. Baseline status alone does not require a new card.
-4. Run `ai-dev-card verify`. Exit codes:
-   - `0` passed. Go to step 5.
+2. Before changing source, run `ai-dev-card preflight`. It tests the pinned base in a disposable checkout or the project's registered stand. Inspect every result and the discovered test count. If the project has no preflight policy, ask the planner to configure its real validation commands. Repair missing tools, unavailable stands and zero-test discovery, then use `preflight --rerun`. A known unrelated baseline test failure needs an explicit `preflight acknowledge --check NAME --reason TEXT --evidence REFERENCE` explaining the cause and citing evidence; triage that defect under the existing finding rules. Acknowledgement permits implementation, not acceptance of failing checks. A resumed or inherited card may run a late baseline probe, but must report `before_candidate_changes=false` honestly. Rerun after environment changes.
+3. If `status` says the reviewer asked for changes, read `ai-dev-card review fix-brief`. Fix every item under "Must fix". Add each listed reproduction test to the patch at the given path.
+4. Work only inside the workspace. Keep the change inside the contract. Triage a discovered baseline defect by severity, size and risk: a small suitable fix can join this card after the planner adds its scenario and checks; larger or riskier work goes to a follow-up. Baseline status alone does not require a new card.
+5. Run `ai-dev-card verify`. Exit codes:
+   - `0` passed. Go to step 6.
    - `1` a check failed on your change. Read the log path in the output, fix the code, verify again.
    - `2` the checks could not judge the change: a command could not start or timed out, or the same check fails on the base revision. Use the recovery procedure below.
    - `3` the budget of failed verifications is spent. Run `ai-dev-card recover verification` and follow the recovery decision below.
-5. When `status` shows `delivery: pr` or `delivery: release`, commit on the card's branch, push it and open the pull request now, so CI runs while the review does. Committing does not change the tree, so the receipt stays valid. Later fixes go to the same branch.
-6. Call `kanban_request_review(summary=..., reviewer=<reviewer from status>)`. In the summary say what changed, which verification passed and the pull request URL if there is one. Stop after this call.
+6. When `status` shows `delivery: pr` or `delivery: release`, commit on the card's branch, push it and open the pull request now, so CI runs while the review does. Committing does not change the tree, so the receipt stays valid. Later fixes go to the same branch.
+7. Call `kanban_request_review(summary=..., reviewer=<reviewer from status>)`. In the summary say what changed, which verification passed and the pull request URL if there is one. Stop after this call.
 
 Editing a file after a passing verification makes the receipt stale. Verify again before requesting review.
 

@@ -33,6 +33,7 @@ DEFAULTS = {
     "checks": [],
     "check_timeout": 900,
     "base_probe": True,
+    "preflight": None,
     "max_defect_failures": 5,
     "max_attempts": 5,
     "delivery": "local",
@@ -108,6 +109,8 @@ def load(repo=None, origin=None):
         release.validate_pr_ci(result["pr_ci"])
     if type(result["require_scenario_evidence"]) is not bool:
         raise CardError("Set require_scenario_evidence to true or false in the policy, then run ai-dev-card doctor.")
+    from .preflight import validate as validate_preflight
+    validate_preflight(result["preflight"])
     validate_checks(result["checks"], f"Policy file {path}")
     review = result["review"]
     if set(review) - set(DEFAULTS["review"]):

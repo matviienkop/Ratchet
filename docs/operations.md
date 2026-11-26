@@ -160,3 +160,7 @@ Manual proof contains `tree`, `scenario`, `result: "pass"` and nonempty `observe
 On an active legacy card, add evidence links with `contract set`. Adding fields to an otherwise unchanged scenario does not weaken the frozen contract. Do not invent passing evidence for historical cards. Completed cards are not migrated or reopened by installation. Projects can set `require_scenario_evidence: false` during an explicit migration; malformed references remain errors.
 
 When the owner chooses a fresh implementation card, run `ai-dev-card contract inherit --from-card ID --from-board BOARD` on the fresh destination. It copies the contract and obligations with provenance, copies stored reproductions, and reruns them on the first new review candidate. It does not carry over acceptance, owner waivers, CI or manual proof. The source card stays unchanged. Inheritance refuses to overwrite an existing destination contract. The rewrite consumes the next shared implementation attempt; an exhausted source needs an owner extension before verification. Diagnosis permissions are not copied. The inherited contract is frozen from the start: `contract set` can add criteria, scenarios, checks and evidence links, and removing or changing an inherited one needs `--owner-ref`.
+
+## Before implementation
+
+Configure and run [project preflight](preflight.md) to establish environment readiness and baseline test discovery before source edits. Its receipts and failure assessments are separate from candidate acceptance and do not consume correction attempts.

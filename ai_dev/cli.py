@@ -8,7 +8,7 @@ import shutil
 import sys
 
 from . import __version__, gate, gitio, policy as policies, release, review, severity, stands, verify
-from . import recovery, recovery_wake, findings, continuity
+from . import preflight, recovery, recovery_wake, findings, continuity
 from .stand_cli import add_command as add_stand_command
 from .history import add_commands as add_history_commands
 from .analytics import add_command as add_analytics_command
@@ -35,6 +35,7 @@ def status(args):
         workspace = gitio.repo_root(_workspace(args))
         tree = gitio.snapshot(workspace)
         settings = policies.load(repo=gitio.main_repo(workspace), origin=gitio.origin(workspace))
+        result["preflight_configured"] = settings.get("preflight") is not None
         result["reviewer"] = settings["review"]["reviewer"]
         result["delivery"] = settings["delivery"]
         rule = release.selected(state.get("contract"), settings)
@@ -88,6 +89,9 @@ def status(args):
             if issue:
                 step = issue
                 break
+    if settings and state["contract"]:
+        result["preflight"] = state.get("preflight")
+        step = preflight.issue(state, settings) or step
     result["next"] = step
     return result, 0
 
@@ -196,6 +200,13 @@ def main(argv=None):
     parser.add_argument("--board", help="Board slug. Defaults to HERMES_KANBAN_BOARD, then `default`.")
     parser.add_argument("--workspace", help="Working tree. Defaults to HERMES_KANBAN_WORKSPACE, then the current directory.")
     commands = parser.add_subparsers(dest="command", required=True)
+    pre = commands.add_parser("preflight", help="Check the project validation environment on the base revision.")
+    pre.add_argument("action", nargs="?", choices=("run", "show", "acknowledge"), default="run")
+    pre.add_argument("--rerun", action="store_true")
+    pre.add_argument("--check")
+    pre.add_argument("--reason")
+    pre.add_argument("--evidence")
+    pre.set_defaults(run=lambda args: preflight.command(args, _card(args), _workspace(args)))
     add_history_commands(commands, _card)
     add_analytics_command(commands, _card)
     add_stand_command(commands, _card, _workspace)

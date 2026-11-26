@@ -178,3 +178,14 @@ class Analytics(unittest.TestCase):
         rows = [r for r in self.data()['observations'] if r['source'] == 'api_request']
         self.assertEqual(len(rows), 2)
         self.assertEqual({r['data']['retry_count'] for r in rows}, {1, 2})
+
+    def test_preflight_projection_keeps_discovery_and_excludes_commands(self):
+        with self.card.locked() as state:
+            state['preflight_history'] = [{'id': 1, 'at': NOW, 'ready': False, 'base': 'base',
+                'before_candidate_changes': True, 'checks': [{'name': 'tests', 'klass': 'environment',
+                    'test_count': 0, 'argv': ['PRIVATE COMMAND']}]}]
+        analytics.collect(native=False, clock=NOW)
+        rows = [r for r in self.data()['observations'] if r['source'] == 'preflight']
+        self.assertEqual(rows[0]['data']['checks'][0]['test_count'], 0)
+        self.assertFalse(rows[0]['data']['ready'])
+        self.assertNotIn('PRIVATE COMMAND', json.dumps(rows))

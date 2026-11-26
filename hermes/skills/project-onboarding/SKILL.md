@@ -7,6 +7,8 @@ description: Register or resume a project, add or remove repositories from an ex
 
 For requests to change acceptance checks, edit the policy file that `ai-dev-card doctor` reports. Checks live under `repos` keyed by the repository path or origin URL: each has a `name`, an `argv` array, an optional `timeout` in seconds, `stage` (`pre_review` or `post_review`) and, for a registered project stand, `stand` with the stand name plus `project` on the repository entry. For example, a post-review integration suite is `{"name": "integration", "argv": ["make", "integration"], "stage": "post_review"}`. The owner can describe this in ordinary language. Change only what they asked for, run `ai-dev-card doctor` and confirm the result in the owner's language. When the policy file is under `/etc/ai-dev`, hand the change to the operator.
 
+Configure project `preflight` before dispatching implementation. Use real readiness and baseline commands from the repository, with `tests_pattern` matching observed test-runner output. A named `count` group extracts reported totals; a pattern without it counts individual test records. Confirm the pattern rejects empty discovery. Use the existing registered stand when the project requires a VM or integration environment. For a repository with no applicable automated tests, record an explicit operator-approved `no_tests_reason` and retain meaningful readiness checks. See `docs/preflight.md`. Do not silently invent a passing discovery command or remove acceptance checks.
+
 Include a brief stack and quality-tool inventory in the owner's onboarding
 summary. Identify existing checks and propose additions for specific gaps.
 Distinguish configured checks from checks actually run and report any unknown

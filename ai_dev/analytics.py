@@ -128,6 +128,11 @@ def local_rows(card, state, clock):
         if event.get("event") == "handoff":
             row.update(select(event, "finished result actor inputs reason"))
         yield "event", index, event.get("at"), row
+    for receipt in state.get("preflight_history", []):
+        row = select(receipt, "id base started duration_seconds before_candidate_changes ready no_tests_reason")
+        row["checks"] = [select(c, "name stand klass exit_code seconds test_count problem log_sha256 assessment")
+                         for c in receipt["checks"]]
+        yield "preflight", receipt["id"], receipt.get("at"), row
     for v in state["verifications"]:
         row = select(v, "id at started duration_seconds stage tree base passed result problem checks_digest patch_sha256")
         row["checks"] = [select(c, "name klass exit_code seconds stand log_sha256") for c in v["checks"]]

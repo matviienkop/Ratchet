@@ -211,6 +211,10 @@ def verify(card, worktree, stage="pre_review", rerun=False):
         raise CardError(f"Unknown stage {stage}.")
     with card.locked() as state:
         worktree, settings, tree = prepare(state, worktree)
+        from .preflight import issue
+        problem = issue(state, settings)
+        if problem:
+            raise CardError(problem)
         contract = state["contract"]
         checks = checks_for(settings, contract, stage)
         if not checks:
