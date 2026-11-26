@@ -209,6 +209,9 @@ def recover(card, worktree, kind, child=None):
             if len(incident.get("waits", [])) > count:
                 record(state, "recovery.capacity-wait", due=choice["due"], marker=choice["reason"])
             if choice:
+                if choice["action"] == "schedule":
+                    # Hermes has no board tool for this transition; its command line is the native surface.
+                    choice["command"] = f"hermes kanban --board {card.board} schedule {card.id} {choice['reason']}"
                 return choice, 0
         if not child:
             body = (f"{incident['marker']}\nInvestigate the {kind} boundary for {card.board}/{card.id}. "

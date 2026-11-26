@@ -2,12 +2,15 @@
 
 import os
 from pathlib import Path
+import re
 
 from . import gitio, policy as policies, release, review, verify, findings, recovery
 from .store import Card, CardError, identity
 
 ROLES = ("planner", "coder", "reviewer")
 BOARD_TOOLS = ("kanban_request_review", "kanban_complete", "kanban_request_changes")
+# The same three transitions exist on the Hermes command line, where no hook sees their arguments.
+CLI_TRANSITION = re.compile(r"\bhermes\b[^\n;&|]*?\bkanban(?:\s+--board(?:\s+|=)\S+)?\s+(complete|request-review|request-changes)\b")
 
 
 def role(env=None, plugin_dir=None):
@@ -28,7 +31,15 @@ def decide(tool_name, args, env=None, lane=None):
     """None lets the call through. A string blocks it and tells the worker what to do instead."""
     env = os.environ if env is None else env
     task = env.get("HERMES_KANBAN_TASK")
-    if tool_name not in BOARD_TOOLS or not task or lane not in ("coder", "reviewer"):
+    if not task or lane not in ("coder", "reviewer"):
+        return None
+    if tool_name == "terminal":
+        moved = CLI_TRANSITION.search(str((args or {}).get("command") or ""))
+        if not moved:
+            return None
+        return (f"ai-dev gate: `hermes kanban {moved[1]}` from the terminal skips the evidence check. Use the board "
+                f"tool kanban_{moved[1].replace('-', '_')} instead.")
+    if tool_name not in BOARD_TOOLS:
         return None
     target = (args or {}).get("task_id")
     if target and target != task:

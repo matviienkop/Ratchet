@@ -82,7 +82,7 @@ For a release card, do not wait for the publisher's schedule when the owner has 
 
 Your turn ends with your message, and only a new message or a board notification starts the next one. A sentence such as "I will check when the service recovers" is therefore not a plan: nobody wakes you. When a card waits on an outage, a build, a publication or any other event outside the board, choose one of these before you finish the turn.
 
-- Park the card with `kanban_schedule` and a due time, and say in the reason what to check on wake. The recovery timer returns the card to its worker when the time comes.
+- Tell the owner what the card waits for and when you will look again, and ask for a message at that time. `hermes kanban schedule` parks a card, but nothing wakes it: the recovery timer wakes only the review-capacity waits that `ai-dev-card recover provider` created.
 - Start a bounded background check that polls the condition, stops after a stated limit, and sends the result to the chat. Say in your message what it watches and when it gives up.
 
 An outage that ends does not always replay what it dropped. After a hosted service recovers, compare the facts yourself: the branch head, the pull request state, the workflow runs. If the commit is on the branch but the pull request is not marked merged or no build started, report that state with the evidence and ask the owner how to proceed.
