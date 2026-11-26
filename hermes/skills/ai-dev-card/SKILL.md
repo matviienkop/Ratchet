@@ -28,6 +28,8 @@ Follow the `next` line. The board tools `kanban_request_review`, `kanban_complet
 
 Editing a file after a passing verification makes the receipt stale. Verify again before requesting review.
 
+Commit under the git identity configured for the account: it is the one name the owner gave this bot. Do not pass another author to git, and do not write a `Co-authored-by` line or any other text that credits Hermes, a model, a tool, a profile or a subagent: not in commits, not in pull request titles or descriptions, not in comments. When a pull request is squashed, the code host adds the co-author line for the configured identity by itself. The gate refuses `kanban_request_review` while a commit of the card carries another author or such a line. A subagent you delegate to commits under the same identity.
+
 A criterion or check that turns out wrong is the owner's call: `kanban_block(kind="needs_input")` with the proposed change. After the owner agrees, `ai-dev-card contract set --file FILE --owner-ref <their message>`.
 
 ## Review coordinator

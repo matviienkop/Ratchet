@@ -51,6 +51,18 @@ def _card(env):
     return Card(board, card).load(), settings, gitio.snapshot(workspace)
 
 
+def _attribution(env, state):
+    """Commits go out under the one configured identity, with no line that credits another agent, model or tool."""
+    workspace = gitio.repo_root(env["HERMES_KANBAN_WORKSPACE"])
+    problems = gitio.attribution(workspace, state["base"]) if state.get("base") else []
+    if not problems:
+        return None
+    return ("ai-dev gate: " + "; ".join(problems[:4]) + ". Commit under the git identity configured for this "
+            "account and write no Co-authored-by line yourself. Rewrite the card's commits, for example `git rebase "
+            f"{state['base'][:12]} --exec 'git commit --amend --no-edit --reset-author'`, edit a message that "
+            "carries such a line, then push the branch with `--force-with-lease`.")
+
+
 def _coder(tool_name, env):
     if tool_name == "kanban_complete":
         return ("ai-dev gate: a coding card finishes through review. Run `ai-dev-card verify`, then call "
@@ -62,7 +74,7 @@ def _coder(tool_name, env):
         return ("ai-dev gate: this card has no contract. Run `ai-dev-card contract set --file FILE`, then "
                 "`ai-dev-card verify`.")
     if verify.passing_receipt(state, settings, tree, "pre_review"):
-        return None
+        return _attribution(env, state)
     last = verify.last_for(state, tree, "pre_review")
     if last and not last["passed"]:
         return (f"ai-dev gate: the last verification of this tree ended as {last['result']}. Fix it and run "

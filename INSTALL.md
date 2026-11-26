@@ -22,6 +22,15 @@ hermes -p default tools enable kanban --platform telegram
 
 Set each profile's model with `hermes -p NAME setup` or its `config.yaml`.
 
+Give the account one git identity before the first card. It is either the owner's own, or the name the owner gave the bot:
+
+```sh
+git config --global user.name "NAME"
+git config --global user.email "ADDRESS"
+```
+
+Without an identity a worker invents one for each commit, a different one per profile, and a squash merge adds a co-author line for each. With the owner's address, which the code host links to the account that merges, no co-author line appears. With a bot name and an address of its own, every squash carries one line with that name. The gate refuses review for a card whose commits carry an author that is neither the configured identity nor known on the base branch.
+
 ## 2. Programs, plugin and skills
 
 ```sh
