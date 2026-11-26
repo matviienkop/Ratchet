@@ -5,7 +5,7 @@ import re
 from .store import CardError
 
 PROVIDERS = {"hermes-usage": "openai-codex", "claude-json": "anthropic"}
-EXTERNAL = {"quota", "auth", "provider_unavailable"}
+EXTERNAL = {"quota", "auth", "provider_unavailable", "provider_refused"}
 TIERS = ("standard", "advanced", "frontier")
 
 
@@ -122,6 +122,8 @@ def runner_failure(done, member, usage):
             if _sdk_model_rejected(line, member.get("model")):
                 return "provider_unavailable", f"provider_unavailable (exit {done.returncode}): {line[-350:]}"
     for kind, pattern in (
+        # The provider declined this request. Another provider judges it by its own rules.
+        ("provider_refused", r"content_policy_blocked|safety filter (?:refused|rejected)|content was flagged|content.policy.violation"),
         ("quota", r"\b429\b|rate.limit|quota|usage.limit|credit balance|limit reached|hit your limit"),
         ("auth", r"\b(?:401|403)\b|unauthenticated|invalid.api.key|not logged in|authentication.error|token.expired|expired.token|invalid.bearer.token"),
         ("provider_unavailable", r"\b(?:500|502|503|504)\b|overloaded|model.not.found|service.unavailable|model.{0,60}(?:unavailable|does not exist)|connection refused"),

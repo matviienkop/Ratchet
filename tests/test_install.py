@@ -23,6 +23,10 @@ spec = importlib.util.spec_from_file_location("ai_dev_install", ROOT / "hermes" 
 install = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(install)
 
+spec = importlib.util.spec_from_file_location("ai_dev_fallback", ROOT / "hermes" / "availability-fallback.py")
+fallback = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fallback)
+
 
 class Context:
     def __init__(self):
@@ -30,6 +34,40 @@ class Context:
 
     def register_hook(self, name, callback):
         self.hooks[name] = callback
+
+
+class FallbackGuard(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        (self.root / "agent").mkdir()
+        self.file = self.root / "agent" / "chat_completion_helpers.py"
+        self.clean = "def try_activate_fallback(agent, reason=None, reset_at=None):\n" + fallback.ANCHOR + "    return True\n"
+        import hashlib
+        patcher = patch.object(fallback, "EXPECTED", hashlib.sha256(self.clean.encode()).hexdigest())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_guard_lets_a_safety_refusal_reach_the_peer(self):
+        self.file.write_text(self.clean)
+        fallback.install(self.root)
+        patched = self.file.read_text()
+        self.assertEqual(patched, self.clean.replace(fallback.ANCHOR, fallback.GUARD + fallback.ANCHOR))
+        self.assertIn('"content_policy_blocked"', fallback.GUARD)
+        self.assertIn('"rate_limit"', fallback.GUARD)
+        fallback.install(self.root)
+        self.assertEqual(self.file.read_text(), patched)
+
+    def test_earlier_guard_is_replaced_and_unknown_source_is_refused(self):
+        self.file.write_text(self.clean.replace(fallback.ANCHOR, fallback.AVAILABILITY_ONLY + fallback.ANCHOR))
+        fallback.install(self.root)
+        text = self.file.read_text()
+        self.assertEqual(text.count("ai-dev:"), 1)
+        self.assertIn(fallback.GUARD + fallback.ANCHOR, text)
+        self.file.write_text(self.clean + "# another Hermes revision\n")
+        with self.assertRaisesRegex(ValueError, "Unknown Hermes fallback"):
+            fallback.install(self.root)
 
 
 class Install(unittest.TestCase):

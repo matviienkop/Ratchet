@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Restrict a dedicated Hermes 0.21.5 install's fallback chain to availability failures."""
+"""Restrict a dedicated Hermes 0.21.5 install's fallback chain to two cases: the provider is unavailable,
+or its safety filter refused the request."""
 import argparse
 import ast
 import hashlib
@@ -8,13 +9,24 @@ import os
 import tempfile
 
 ANCHOR = "    from agent.fallback_cooldown import _arm_rate_limit_cooldown, switch_deferred_by_reset\n"
-GUARD = """    # ai-dev: switch subscriptions only on classified provider availability failures.
+AVAILABILITY_ONLY = """    # ai-dev: switch subscriptions only on classified provider availability failures.
     if getattr(reason, "value", None) not in (
         "billing", "rate_limit", "upstream_rate_limit", "overloaded", "server_error",
         "timeout", "model_not_found", "model_entitlement", "auth", "auth_permanent",
     ):
         return False
 """
+# A refusal is the provider's decision about this request, so the same request goes to the peer unchanged.
+GUARD = """    # ai-dev: switch subscriptions when the provider is unavailable or its safety filter refuses the request.
+    if getattr(reason, "value", None) not in (
+        "billing", "rate_limit", "upstream_rate_limit", "overloaded", "server_error",
+        "timeout", "model_not_found", "model_entitlement", "auth", "auth_permanent",
+        "content_policy_blocked",
+    ):
+        return False
+"""
+# Guards written by earlier versions of this script; an upgrade replaces them.
+PREVIOUS = (AVAILABILITY_ONLY,)
 EXPECTED = "c83ecb529990e837f0c29afdf1abc00a5eebd9c8b532c45409734010c68561d2"
 
 
@@ -22,7 +34,9 @@ def install(root):
     path = root / "agent" / "chat_completion_helpers.py"
     original = path.read_bytes()
     data = original.decode()
-    clean = data.replace(GUARD + ANCHOR, ANCHOR, 1)
+    clean = data
+    for guard in (GUARD, *PREVIOUS):
+        clean = clean.replace(guard + ANCHOR, ANCHOR, 1)
     if hashlib.sha256(clean.encode()).hexdigest() != EXPECTED or clean.count(ANCHOR) != 1:
         raise ValueError("Unknown Hermes fallback implementation. Keep fallback chains disabled until verified.")
     patched = clean.replace(ANCHOR, GUARD + ANCHOR)

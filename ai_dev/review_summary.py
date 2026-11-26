@@ -5,6 +5,7 @@ import json
 
 from . import severity
 from .store import record
+from . import review_routes
 
 
 def findings(state, rnd):
@@ -62,7 +63,7 @@ def diversity(rnd):
     providers = [slot.get("runtime", {}).get("provider") for slot in rnd.get("panel", {}).values()
                  if slot.get("status") == "ok"]
     down = [slot for slot in rnd.get("panel", {}).values() if slot.get("status") == "unavailable"
-            and slot.get("error_class") in ("quota", "auth", "provider_unavailable")]
+            and slot.get("error_class") in review_routes.EXTERNAL]
     if len(providers) == 1 and providers[0] and down:
         return "single-reviewer"
     if len(providers) != 2 or not all(providers):
