@@ -1,0 +1,86 @@
+name: Image
+
+# Builds the bot image from the newest Hermes Agent release and this repository,
+# runs the smoke test, and publishes to the GitHub Container Registry.
+# A pull request builds and tests without publishing.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ai_dev/**"
+      - "bin/**"
+      - "docker/**"
+      - "hermes/**"
+      - "stands/**"
+      - ".dockerignore"
+      - ".github/workflows/image.yml"
+  pull_request:
+    paths:
+      - "ai_dev/**"
+      - "bin/**"
+      - "docker/**"
+      - "hermes/**"
+      - "stands/**"
+      - "tests/**"
+      - ".dockerignore"
+      - ".github/workflows/image.yml"
+  schedule:
+    # Once a day, to pick up a new Hermes release. The build is skipped when the
+    # image for the current Hermes release and commit already exists.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      hermes_version:
+        description: Hermes release tag, or "latest" for the newest release
+        default: latest
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      HERMES_VERSION: ${{ inputs.hermes_version || 'latest' }}
+      SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+      PUBLISH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests
+
+      - name: Name the image
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ratchet-bot" >> "$GITHUB_ENV"
+
+      - name: Log in to the registry
+        if: env.PUBLISH == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and test
+        if: env.PUBLISH != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: docker/build.sh
+
+      - name: Build, test and publish
+        if: env.PUBLISH == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: docker/build.sh --push ${{ github.event_name == 'schedule' && '--if-missing' || '' }}
+
+      - name: Disk space
+        if: always()
+        run: df -h / | tail -1

@@ -8,6 +8,7 @@ FROM ${HERMES_IMAGE}:${HERMES_VERSION}
 
 ARG HERMES_VERSION
 ARG RATCHET_REVISION=unknown
+ARG SOURCE_URL=
 # Claude Code runs the Anthropic reviewer of the default review panel. Empty skips it.
 ARG CLAUDE_CODE_VERSION=latest
 
@@ -59,6 +60,7 @@ ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
 LABEL org.opencontainers.image.title="ratchet-bot" \
       org.opencontainers.image.description="Hermes Agent with the Ratchet layer for gated coding cards" \
       org.opencontainers.image.revision="${RATCHET_REVISION}" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
       io.ratchet.hermes.version="${HERMES_VERSION}"
 
 CMD ["gateway", "run"]

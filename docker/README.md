@@ -17,7 +17,20 @@ The script asks GitHub for the newest Hermes release, checks that `nousresearch/
 | `IMAGE` | `ratchet-bot` | Name of the image to build, with its registry. |
 | `CLAUDE_CODE_VERSION` | `latest` | npm version of Claude Code. Empty leaves it out. |
 
-`--push` pushes both tags after the smoke test. `--no-smoke` skips the test.
+`--push` pushes both tags after the smoke test. `--if-missing` does nothing when the registry already has the tag. `--no-smoke` skips the test.
+
+## Published image
+
+The workflow `.github/workflows/image.yml` builds on GitHub and publishes to the GitHub Container Registry as `ghcr.io/OWNER/ratchet-bot`.
+
+| Event | What happens |
+| --- | --- |
+| Push to `main` that touches the code or the image files | Unit tests, build, smoke test, publish. |
+| Daily schedule | The same, with `--if-missing`: a new Hermes release produces a new image, otherwise nothing is built. |
+| Manual run | The same, with the Hermes release you enter. |
+| Pull request | Unit tests, build and smoke test. Nothing is published. |
+
+Each publication pushes the full tag and moves `latest`. Deploy by the full tag.
 
 Pin `HERMES_VERSION` for a build you need to repeat. Ratchet hooks into Hermes plugin hooks and board tools, so a new Hermes release can break it. The smoke test checks that the plugin loads and the board works. It does not run a model, so it cannot show that a card passes the gates.
 

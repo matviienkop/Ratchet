@@ -11,18 +11,22 @@
 #   HERMES_REPO      GitHub repository whose releases name the version (default NousResearch/hermes-agent)
 #   IMAGE            name of the image to build (default ratchet-bot)
 #   CLAUDE_CODE_VERSION  npm version of Claude Code, empty to leave it out (default latest)
+#   SOURCE_URL       repository URL for the image's source label; a registry uses it to link the package
+#   GITHUB_TOKEN     optional, used only to ask GitHub for the newest release
 # Options:
-#   --push       push both tags after the smoke test
-#   --no-smoke   skip docker/smoke.sh
+#   --push        push both tags after the smoke test
+#   --if-missing  do nothing when the registry already has the tag this build would produce
+#   --no-smoke    skip docker/smoke.sh
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-push=0 smoke=1
+push=0 smoke=1 if_missing=0
 for arg in "$@"; do
     case "$arg" in
         --push) push=1 ;;
+        --if-missing) if_missing=1 ;;
         --no-smoke) smoke=0 ;;
-        -h|--help) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -33,7 +37,13 @@ hermes_version=${HERMES_VERSION:-latest}
 image=${IMAGE:-ratchet-bot}
 
 if [ "$hermes_version" = latest ]; then
-    hermes_version=$(curl -fsSL --retry 3 "https://api.github.com/repos/${hermes_repo}/releases/latest" |
+    # An anonymous call shares a small hourly quota with everything else on the same address.
+    auth=()
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    fi
+    hermes_version=$(curl -fsSL --retry 3 ${auth[@]+"${auth[@]}"} \
+        "https://api.github.com/repos/${hermes_repo}/releases/latest" |
         python3 -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])')
     echo "Newest Hermes release: ${hermes_version}"
 fi
@@ -48,12 +58,18 @@ if [ -n "$(git -C "$root" status --porcelain)" ]; then
 fi
 tag="${image}:hermes-${hermes_version#v}-ratchet-${revision}"
 
+if [ "$if_missing" = 1 ] && docker manifest inspect "$tag" >/dev/null 2>&1; then
+    echo "Already published: ${tag}"
+    exit 0
+fi
+
 docker build --pull \
     --file "$root/docker/Dockerfile" \
     --build-arg "HERMES_IMAGE=${hermes_image}" \
     --build-arg "HERMES_VERSION=${hermes_version}" \
     --build-arg "RATCHET_REVISION=${revision}" \
     --build-arg "CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION-latest}" \
+    --build-arg "SOURCE_URL=${SOURCE_URL:-}" \
     --tag "$tag" --tag "${image}:latest" \
     "$root"
 
