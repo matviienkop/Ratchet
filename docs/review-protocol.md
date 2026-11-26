@@ -19,8 +19,8 @@ The protocol exists to end one failure: a green candidate that a reviewer return
    A reviewer who cannot write the test records `--cannot-reproduce REASON`. The finding becomes `unconfirmed`: listed for the owner, not blocking.
 
    Only a `candidate` can be confirmed. A confirmed blocker leaves that state through a fix that makes its reproduction pass, or through the owner's waiver; a reviewer cannot withdraw it.
-4. **Gaps.** `kind: gap` says a criterion has no proof at all. In round 1, the coordinator must inspect the contract and cite independent repository or verification evidence before a gap can block. It closes when no reviewer raises it again.
-5. **Ledger.** Every finding gets a stable key derived from its mechanism, so two reviewers describing one cause share an entry. Statuses: `candidate`, `confirmed`, `gap`, `fixed`, `disproved`, `unconfirmed`, `note`, `discovery`, `waived`, `resolved`.
+4. **Gaps.** `kind: gap` says a criterion has no proof at all. In round 1, the coordinator must inspect the contract and cite independent repository or verification evidence before a gap can block. It remains open across silent rounds. Close it with `finding resolve KEY --outcome resolved --reason TEXT --evidence FILE` using evidence for the current candidate, or obtain an owner waiver. The round cap still applies.
+5. **Ledger.** Every finding gets a stable key derived from its mechanism, so two reviewers describing one cause share an entry. Statuses: `candidate`, `confirmed`, `gap`, `fixed`, `disproved`, `unconfirmed`, `note`, `discovery`, `waived`, `resolved`, `deferred`.
 6. **Settled stays settled.** A finding that was fixed, disproved, unconfirmed or waived returns to `candidate` only when a reviewer raises it again. It is then judged as stated in the new report and needs a new confirmation on the current tree.
 7. **Closure is checked by code.** When a new candidate arrives, every stored reproduction of a confirmed blocker is rerun on it. One that passes marks its finding `fixed`. The reviewer does not vote on it.
 8. **Round 1 is full, later rounds are delta.** The brief of a later round carries the interdiff from the previous candidate and the open blockers.
@@ -62,15 +62,32 @@ When the round settles `accept` and a `post_review` check then fails on the chan
 
 ## Late findings after an accepted round
 
-A finding can arrive after the round settled `accept`: a hosted review comment on the pull request, a CI result, an owner remark. The gate then refuses `kanban_request_changes` from the reviewer, and `review brief` returns the settled round for the same tree. The ledger has no command to add such a finding, so the planner carries it:
+A hosted comment can arrive after `accept`. Import it before the delivery checks:
 
-1. The review coordinator reproduces the finding on the candidate and on the base, stores the evidence in the card's evidence directory and blocks the card with `kanban_block(kind="needs_input")`, naming the finding, the evidence and the verdict. A finding that does not reproduce is a note.
-2. A finding confirmed as a regression or a contract violation goes back to the author. The planner logs a board comment with the ordinal of the return, the finding's identifier, the evidence and the required fix, then returns the card with the native board command (`hermes kanban reopen-review`, Hermes 0.21.5 `hermes_cli/kanban.py`). The author adds the reproduction test to the patch. The new tree passes verification, a new review round, the post-review checks and the delivery gates as usual.
-3. One card takes at most two late returns. The count is the number of logged late returns, not of review rounds.
-4. After two returns the card is not returned again and the owner is not asked for a third. The planner files one tracker ticket per remaining confirmed regression, with the reproduction and links to the original ticket and pull request, then completes the card through its normal merge and release gates.
-5. After the release is verified the planner takes the follow-ups without asking the owner, one ticket at a time, each through the full cycle: the regression tickets first, then advisory notes and baseline discoveries. No follow-up starts while the original card is open. The planner creates the follow-up cards at once and links each as the child of the previous one, so the dispatcher, not the planner's memory, starts the next card.
+```sh
+ai-dev-card finding import --file hosted.json
+ai-dev-card finding list
+```
 
-Panel reports, the contract and the gates stay unchanged throughout.
+`hosted.json` contains `source`, an HTTPS comment URL, `tree`, the current reviewed Git tree, and `finding`, one finding in the panel report format. Repeated identical imports are idempotent. New evidence for an old mechanism requires a new disposition. Import records an event without rewriting the settled panel report. Before associating an older comment with the current tree, inspect whether its scenario still applies.
+
+Assess rating conflicts with `finding assess`, then reproduce blocker candidates with `confirm`. These commands also work on imported findings after acceptance. A failed confirmation remains visible; a contractual finding with no reproduction needs the owner's explicit waiver, not silent completion.
+
+For a confirmed late defect run `ai-dev-card finding return --reason TEXT` in the active Hermes worker, then call `kanban_request_changes`. The planner can use native `hermes kanban reopen-review` when the card is already done. Each return authorization records its tree and native run or planner session. Retries in that run reuse the reservation; a new run needs a new reservation. At most two reservations are available. Native Hermes remains responsible for performing transitions. A direct planner CLI transition must follow the same ledger procedure; Ratchet is not an adversarial boundary around the service account.
+
+After two late returns, confirmed residual regressions can be deferred with `finding resolve KEY --outcome deferred --ticket HTTPS_URL --reason TEXT`. An unmet contract criterion cannot be discharged by creating a ticket: fix it or record the owner's explicit waiver. Keep the original criteria when rewriting the implementation. Ordinary review caps still apply; this command creates no extra review rounds.
+
+Before completion, every finding of medium severity or above and every contractual finding needs a disposition. Low non-contract notes stay advisory. The explicit outcomes are:
+
+- `fixed` or `disproved`, derived from running the reproduction;
+- `resolved`, with a reason and current-candidate evidence for a gap or advisory finding;
+- `deferred`, with a linked tracker ticket and a scope justification;
+- `waived`, with the owner's message and reason;
+- `not-planned`, only for low non-contract notes, stored as a resolved disposition.
+
+Absolute evidence must be a recorded verification log for the current tree, or manual JSON containing the current `tree` and a nonempty `observed` result. A tracked repository file binds evidence to the reviewed commit. A source citation cannot close a confirmed defect. Record what the evidence proves in the reason.
+
+Follow-up execution uses the project's existing authorization and native queue. Do not start a follow-up while its parent is open or create another card to bypass the same task's review cap. Search for an existing issue before filing a new one.
 
 ## Follow-ups: classification, disposition and order
 
@@ -83,7 +100,9 @@ Every finding that does not block the card, and every problem a repair worker me
 | critical | S1 | Data loss, a security breach, or the product cannot be used |
 | high | S2 | A main function is broken and no acceptable workaround exists |
 | medium | S3 | A secondary function is wrong, or a workaround exists |
-| low | S4 | Minor or cosmetic; includes tests-only and maintainability findings |
+| low | S4 | Minor or cosmetic without an unproven acceptance requirement |
+
+Test-only findings take their severity from the behavior left unproven. A signature test that passes with verification disabled can be an acceptance gap; its file type does not make it S4.
 
 **Priority** orders all tickets, defects and features alike. `priority:P0` blocks a release or needs action now, `P1` is next in line, `P2` is normal, `P3` is done when cheap. For a defect the planner derives it from severity (S1 gives P0, S2 gives P1, S3 gives P2, S4 gives P3) and may move it one step with a stated reason. The owner can set any priority.
 

@@ -28,6 +28,8 @@ ai_dev/policy.py    operator settings: checks, budgets, review rules per reposit
 ai_dev/gitio.py     tree snapshot, anchored commits, diffs, scratch checkouts
 ai_dev/verify.py    contract, check runner, base probe, receipts, failure budget
 ai_dev/review.py    brief, reports, ledger, confirmation, settle, panel
+ai_dev/findings.py  hosted finding intake, explicit dispositions, bounded late-return reservations
+ai_dev/continuity.py carry obligations and reproductions into a fresh implementation card
 ai_dev/gate.py      allow or block a board tool for the coder or reviewer lane
 ai_dev/stands.py    trusted stand drivers
 ai_dev/cli.py       the ai-dev-card command

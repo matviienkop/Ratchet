@@ -8,7 +8,7 @@ import shutil
 import sys
 
 from . import __version__, gate, gitio, policy as policies, release, review, severity, stands, verify
-from . import recovery, recovery_wake
+from . import recovery, recovery_wake, findings, continuity
 from .stand_cli import add_command as add_stand_command
 from .history import add_commands as add_history_commands
 from .store import Card, CardError, home, identity
@@ -85,6 +85,11 @@ def status(args):
 
 def contract(args):
     card = _card(args)
+    if args.action == "inherit":
+        if not args.from_card:
+            raise CardError("Run ai-dev-card contract inherit --from-card ID [--from-board BOARD].")
+        source = Card(*identity(args.from_card, args.from_board or card.board))
+        return continuity.inherit(card, source), 0
     if args.action == "show":
         state = card.load()
         return {"contract": state["contract"], "frozen": state["frozen"]}, 0
@@ -139,8 +144,14 @@ def finding(args):
         return review.waive(card, args.key, args.owner_ref, args.reason), 0
     if args.action == "assess":
         return review.assess(card, _workspace(args), args.key, args.severity, args.impact, args.evidence), 0
+    if args.action == "import":
+        return findings.import_finding(card, _workspace(args), args.file), 0
+    if args.action == "resolve":
+        return findings.resolve(card, _workspace(args), args.key, args.outcome, args.reason, args.evidence, args.ticket), 0
+    if args.action == "return":
+        return findings.late_return(card, _workspace(args), args.reason), 0
     ledger = card.load()["ledger"]
-    return {"findings": [{**severity.describe(e), **{k: e.get(k) for k in ("violates", "location", "first_round")}}
+    return {"findings": [{**severity.describe(e), **{k: e.get(k) for k in ("violates", "location", "first_round", "sources", "disposition", "confirm")}}
                          for e in ledger.values()]}, 0
 
 
@@ -185,9 +196,11 @@ def main(argv=None):
     commands.add_parser("doctor", help="Check the installation and the policy.").set_defaults(run=doctor)
 
     sub = commands.add_parser("contract", help="Criteria, scenarios and checks the card is accepted against.")
-    sub.add_argument("action", choices=("set", "show"))
+    sub.add_argument("action", choices=("set", "show", "inherit"))
     sub.add_argument("--file")
     sub.add_argument("--owner-ref", help="The owner's message that approved weakening a frozen contract.")
+    sub.add_argument("--from-card")
+    sub.add_argument("--from-board")
     sub.set_defaults(run=contract)
 
     sub = commands.add_parser("verify", help="Run the approved checks on the working tree.")
@@ -219,13 +232,16 @@ def main(argv=None):
     sub.set_defaults(run=run_confirm)
 
     sub = commands.add_parser("finding", help="The findings ledger.")
-    sub.add_argument("action", choices=("list", "waive", "assess"))
+    sub.add_argument("action", choices=("list", "waive", "assess", "import", "resolve", "return"))
     sub.add_argument("key", nargs="?")
     sub.add_argument("--owner-ref")
     sub.add_argument("--reason")
     sub.add_argument("--severity", choices=severity.LEVELS)
     sub.add_argument("--impact")
     sub.add_argument("--evidence")
+    sub.add_argument("--file")
+    sub.add_argument("--outcome", choices=("resolved", "deferred", "not-planned"))
+    sub.add_argument("--ticket")
     sub.set_defaults(run=finding)
 
     args = parser.parse_args(argv)
@@ -240,6 +256,8 @@ def main(argv=None):
             raise CardError("review extend needs --owner-ref and --rounds or --failures.")
         if args.command == "finding" and args.action == "waive" and not (args.key and args.owner_ref and args.reason):
             raise CardError("finding waive needs KEY, --owner-ref and --reason.")
+        if args.command == "finding" and args.action == "import" and not args.file:
+            raise CardError("Run ai-dev-card finding import --file FILE.")
         result, code = args.run(args)
     except CardError as error:
         print(f"ai-dev-card: {error}", file=sys.stderr)
