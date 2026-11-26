@@ -189,8 +189,18 @@ class Install(unittest.TestCase):
             self.assertEqual(actual["result"], sanitize(json.loads(expected.stdout)))
         status = json.loads(handler({"operation": "status"}))["result"]
         self.assertEqual((status["card"], status["board"], status["role"]), ("t_native", "test", "coder"))
+        os.environ["AI_DEV_ROLE"] = "reviewer"
+        os.environ["AI_DEV_PLUGIN_DIR"] = str(self.hermes / "profiles/reviewer/plugins/ai-dev-gate")
+        bound = json.loads(handler({"operation": "doctor"}))["result"]
+        self.assertEqual(bound["role"], "coder")
         other = json.loads(handler({"operation": "status", "card": "t_other", "board": "other"}))["result"]
         self.assertEqual((other["card"], other["board"]), ("t_other", "other"))
+        with patch("ai_dev.hermes_tools.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, "{}", "")
+            handler({"operation": "status", "workspace": str(self.root / "work tree")})
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[argv.index("--workspace") + 1], str(self.root / "work tree"))
+            self.assertEqual(run.call_args.kwargs["env"]["AI_DEV_ROLE"], "coder")
 
     def test_native_inspection_rejects_commands_and_returns_cli_errors(self):
         from ai_dev.hermes_tools import inspect_card

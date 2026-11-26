@@ -145,3 +145,5 @@ For containers, schedule `ai-dev-card analytics collect` every fifteen minutes a
 The enabled gate plugin registers `ratchet_inspect` in the `ratchet` toolset. Enable that toolset for each participating profile through `hermes tools` if the profile uses an explicit toolset selection. Verify that the model's tool list contains `ratchet_inspect` before relying on it. The copied role skills keep CLI fallback instructions for existing profiles.
 
 The tool uses the Hermes process's Python interpreter and the installed Ratchet prefix, so it does not depend on the shell PATH. It preserves the worker environment and returns the CLI exit code with redacted output. This stage exposes status, history and doctor only. It does not replace mutation commands, skill installation, redaction or provider routing.
+
+Native handlers bind the role and plugin path at registration, because loading another profile can change process environment variables. From planner chat, pass `workspace` when inspecting a card outside the current working tree.
