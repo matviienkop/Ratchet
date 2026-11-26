@@ -62,6 +62,12 @@ def require_pr_ci(state, settings, tree, pr_url):
         raise CardError("This PR needs current CI evidence. Run " + CHECK_PR
                         + ", then call kanban_complete with metadata.published_pr set to that URL.")
     try:
+        pr, head, number = published_head(rule, pr_url, tree)
+        if pr["merged"] is True:
+            # A project may authorize the merge before completion. The receipt then has to cover the merged head.
+            if head != stored.get("head"):
+                raise CardError("The PR was merged from a head that has no CI receipt. Hand the merged PR to the owner with this gap.")
+            return {**stored, "ci": action_run(rule, head, number, pr), "merged": pr["merge_commit_sha"]}
         current = evidence(rule, pr_url, tree, before_merge=True)
     except (KeyError, TypeError, AttributeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
         raise CardError(f"PR CI could not be confirmed ({exc}). Retry " + CHECK_PR, code=2) from exc

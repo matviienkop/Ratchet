@@ -87,6 +87,11 @@ def inherit(card, source_card):
         state["contract"] = contract
         state["ledger"] = ledger
         state["inherited_from"] = provenance
+        # Inherited obligations were accepted once already; from here they can only grow without the owner.
+        state["frozen"] = True
         record(state, "contract.inherited", source=provenance, findings=sorted(ledger))
+        record(state, "contract.frozen", digest=verify.digest(contract))
     return {"source": provenance, "findings": sorted(ledger), "contract": contract,
-            "next": "Implement and run ai-dev-card verify. The first review brief reruns inherited reproductions; collect new manual evidence for this tree."}
+            "next": "The inherited contract is frozen: add criteria, scenarios or checks with ai-dev-card contract set. "
+                    "Implement and run ai-dev-card verify. The first review brief reruns inherited reproductions; "
+                    "collect new manual evidence for this tree."}

@@ -91,6 +91,25 @@ class PRDelivery(CardCase):
         with self.assertRaisesRegex(CardError, "differs from the reviewed candidate"):
             release.require_pr_ci(self.card.load(), policy.load(), self.card.load()["premerge_receipt"]["tree"], self.url)
 
+    def test_pr_merged_from_the_verified_head_still_completes(self):
+        self.check()
+        self.pr.update(merged=True, state="closed", merge_commit_sha="d" * 40)
+        self.assertEqual(self.ready()["merged"], "d" * 40)
+        self.run["conclusion"] = "failure"
+        with self.assertRaisesRegex(CardError, "has not passed"):
+            self.ready()
+
+    def test_pr_merged_from_another_head_or_without_a_receipt_is_refused(self):
+        self.pr.update(merged=True, state="closed", merge_commit_sha="d" * 40)
+        with self.assertRaisesRegex(CardError, "current CI evidence"):
+            self.ready()
+        self.pr.update(merged=False, state="open")
+        self.check()
+        self.pr.update(merged=True, state="closed")
+        self.pr["head"]["sha"] = self.run["head_sha"] = "b" * 40
+        with self.assertRaisesRegex(CardError, "no CI receipt"):
+            self.ready()
+
     def test_unconfigured_local_delivery_does_not_make_network_calls(self):
         self.assertIsNone(release.require_pr_ci({}, {"delivery": "local", "pr_ci": self.rule}, "tree", None))
         self.assertIsNone(release.require_pr_ci({}, {"delivery": "pr", "pr_ci": None}, "tree", None))
