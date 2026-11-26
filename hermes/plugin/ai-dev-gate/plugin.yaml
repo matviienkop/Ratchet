@@ -1,6 +1,8 @@
 name: ai-dev-gate
 version: "2.0.0"
 description: Let a coding card move on the Kanban board only with verification and review evidence for its current tree.
+provides_tools:
+  - ratchet_inspect
 provides_hooks:
   - pre_llm_call
   - pre_tool_call

@@ -81,6 +81,8 @@ def register(ctx):
     else:
         os.environ.pop("AI_DEV_ROLE", None)
     os.environ["AI_DEV_PLUGIN_DIR"] = str(HERE)
+    from ai_dev.hermes_tools import register as register_tools
+    register_tools(ctx)
     ctx.register_hook("pre_api_request", provider_attempt)
     ctx.register_hook("api_request_error", provider_error)
     ctx.register_hook("post_api_request", api_completed)
