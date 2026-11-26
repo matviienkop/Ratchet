@@ -35,7 +35,7 @@ A card can add checks in its contract. It cannot remove policy checks.
 4. **Review coordinator** runs `review brief` and `review panel`, confirms each reported blocker candidate once, runs `review settle` and makes the board call it names.
 5. **Changes** send the card back to the coder with the fix brief. **Accept** completes it. For a card with a pull request, Kanban then requires green required checks on its head.
 
-What the owner sees in chat comes from Kanban's notifier: completed, blocked, gave up, crashed, timed out.
+What the owner sees in chat comes from Kanban's notifier: completed, blocked, unblocked, gave up, crashed, timed out, review requested, changes requested and a detected block loop (Hermes 0.21.5 `gateway/kanban_watchers_notifier.py`, `TERMINAL_KINDS`). The native text is one line cut to 200 characters; the stage messages below carry the detail.
 
 ## Owner decisions
 
