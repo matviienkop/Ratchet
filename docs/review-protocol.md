@@ -5,7 +5,7 @@ The protocol exists to end one failure: a green candidate that a reviewer return
 ## Rules
 
 1. **The contract is the boundary.** A blocker names what it violates: `criterion:N`, `scenario:ID`, or `regression`. A blocker that names nothing valid is recorded as a note.
-2. **Three classes.** `blocker` blocks. `note` is a real improvement that does not block. `discovery` is a defect that exists on the base; it becomes a follow-up.
+2. **Three classes.** `blocker` blocks. `note` is a real improvement that does not block. `discovery` is a defect that exists on the base. Assess its severity, size and risk before choosing an inline fix or a follow-up; baseline status alone decides neither.
 3. **A blocker is confirmed by a failing test.** `ai-dev-card confirm` places the reviewer's test files into a scratch checkout of the candidate and of the base and runs the command in both.
 
    | Claim | Candidate | Base | Result |
@@ -38,7 +38,7 @@ A new report supplies all three dimensions for every finding. Class sets the wor
 | medium | A supported case returns incorrect results or requires material manual recovery | A supported input produces the wrong response |
 | low | Limited inconvenience or maintainability cost | A misleading diagnostic with correct behavior |
 
-Each reviewer states the affected user, operation or data in `impact`. The ledger preserves every raw rating, confidence and class. Agreement or a single rating supplies the initial severity. Conflicting ratings use the lower level provisionally, then the coordinator examines the evidence and runs `ai-dev-card finding assess KEY --severity LEVEL --impact TEXT --evidence FILE`. This same step verifies a claimed missing-proof gap. FILE must be a tracked source file of the reviewed commit or independent evidence from verification. Original ratings remain visible. A candidate blocker still requires its reproduction. A pre-existing discovery retains its follow-up disposition at any severity.
+Each reviewer states the affected user, operation or data in `impact`. The ledger preserves every raw rating, confidence and class. Agreement or a single rating supplies the initial severity. Conflicting ratings use the lower level provisionally, then the coordinator examines the evidence and runs `ai-dev-card finding assess KEY --severity LEVEL --impact TEXT --evidence FILE`. This same step verifies a claimed missing-proof gap. FILE must be a tracked source file of the reviewed commit or independent evidence from verification. Original ratings remain visible. A candidate blocker still requires its reproduction. A pre-existing discovery keeps its baseline classification while its severity, size and risk determine the work disposition below. A small suitable fix can join this card; a larger or riskier change belongs in a follow-up.
 
 A low-rated finding is advisory. If all raw ratings are low, promotion into a blocking defect requires a named contract criterion or scenario, a material consequence documented by the coordinator, and a confirmed reproduction. Reclassifying an already confirmed blocker as low requires the usual waiver. Stored findings from older versions display `unknown` until new evidence provides a rating.
 
@@ -108,17 +108,27 @@ Test-only findings take their severity from the behavior left unproven. A signat
 
 **Size** is a relative estimate of the whole change, in T-shirt sizes. `size:S` is one focused change under about 100 changed lines. `size:M` is one subsystem and 100 to 500 lines. `size:L` is several components or 500 to 1000 lines. `size:XL` is more than that. Write the contract of an L with extra care for its failure scenarios. Split an XL into smaller tickets before starting. After the merge, put the actual changed-line count into the ticket's closing comment so estimates can be compared with results.
 
-**Disposition.** A full cycle costs two reviews, the stand, CI and a release, so not every finding earns a fix. Decide for each one:
+**Disposition.** Assess both consequence and implementation cost before deciding where to fix a baseline defect. Baseline status is evidence about origin, not an instruction to file a ticket.
 
-| Finding | Disposition |
+Record the assessment in the ledger:
+
+```sh
+ai-dev-card finding triage KEY --size S --decision inline --reason "Focused fix in the touched path; existing tests cover the surrounding behavior"
+```
+
+`--size` accepts `S`, `M`, `L` or `XL`. `--decision` accepts `inline`, `followup` or `not-planned`; it is optional. The default is `inline` for size S, `followup` for larger findings, or `not-planned` for larger low-severity findings. The triage retains the finding's current severity and derives priority from it. These defaults do not replace inspection: use an explicit decision and reason when risk or scope calls for another choice. Reassess severity first if the impact evidence changed.
+
+| Finding and implementation cost | Disposition |
 | --- | --- |
-| S1 or S2 | Fix it. File the ticket at P0 or P1 |
-| S3 | File a follow-up ticket; it is taken in queue order |
-| S4 | No ticket of its own. Record it as not planned in the round summary, with the reason. Several S4 items in one area, such as test isolation, may share one housekeeping ticket of size S or M |
-| Not reproduced, or reachable only through an unsupported precondition | Drop it and record why |
-| Already covered by an open ticket | Add it to that ticket; file nothing new |
+| Small, understood fix in the current area with limited risk | Choose `inline`. Explain why it fits this card, add its acceptance scenario and tests to the contract, then have the author fix and verify it on the same branch |
+| Larger change, uncertain impact, different subsystem or material additional risk | Choose `followup`. Explain the separation, reuse or create a ticket with severity, priority, size and acceptance criteria, then record `finding resolve KEY --outcome deferred --ticket HTTPS_URL --reason TEXT` |
+| Low-impact work whose cost is not justified | Choose `not-planned` with a reason, then record the matching resolution. A cheap, useful S4 fix can still be inline; a group of related S4 findings may justify one housekeeping ticket |
+| Not reproduced, or reachable only through an unsupported precondition | Record the evidence and reason; do not present it as a confirmed defect. Unmet contractual obligations still need correction or an owner decision |
+| Already covered by an open ticket | Reuse that ticket when the triage selects a follow-up; file nothing new |
 
-Tell the owner which findings were not turned into tickets and why. The owner can overrule any disposition.
+Every discovery needs a recorded triage and a matching disposition before completion. Choosing `inline` makes that fix part of the current acceptance work until it is resolved with current-candidate evidence. The planner adds the scenario and checks with `contract set`; adding scope does not permit removing or weakening existing criteria. A discovery selected for a follow-up does not make its repair a prerequisite of the original scope. A failed required check still needs a passing result. Preserve the round caps and existing authorization boundaries: do not create another card merely to restart the same correction budget.
+
+Tell the owner which defects were fixed inline, deferred or not planned, with the scope and risk reasons. The owner can overrule any disposition.
 
 **Order.** The follow-up queue is sorted by priority, highest first, then by size, smallest first, then by ticket number. Rebuild the chain of cards when a priority or a size changes.
 

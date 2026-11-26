@@ -132,6 +132,8 @@ def _merge(state, rnd, reviewer, report):
             entry.update(details, kind=kind, status=status)
             entry["history"].append({"round": number, "status": status, "by": reviewer,
                                      "reason": "Raised again; a defect needs a reproduction on the current tree."})
+        if klass == "discovery":
+            entry["baseline"] = True
         if klass == "blocker":
             entry["raised_round"] = number
         if reviewer not in entry["reporters"]:
@@ -229,9 +231,10 @@ def brief(card, worktree):
 
 def _recheck(card, state, rnd, worktree, settings):
     """Rerun every stored reproduction on the new candidate. One that passes now closes its finding."""
+    from . import findings
     for key, entry in sorted(state["ledger"].items()):
         proof = entry.get("confirm") or {}
-        if entry["status"] != "confirmed" or not proof.get("argv"):
+        if (entry["status"] != "confirmed" and not findings.inline_pending(entry)) or not proof.get("argv"):
             continue
         log = card.evidence("confirm", key) / f"recheck-round-{rnd['n']}.log"
         outcome = _reproduce(worktree, rnd["commit"], proof["files"], proof["argv"], log,
@@ -334,6 +337,7 @@ def confirm(card, worktree, key, files=(), argv=(), timeout=None, cannot=None):
                      "files_sha256": {name: verify.file_digest(path) for name, path in stored.items()}}
         entry.setdefault("attempts", []).append({"round": rnd["n"], "result": result})
         entry["confirm"], entry["status"] = proof, result
+        entry["baseline"] = result == "discovery"
         if result == "disproved":
             entry["disposition"] = {"outcome": "disproved", "tree": rnd["tree"], "evidence": proof, "at": now()}
         elif result in ("confirmed", "discovery", "unconfirmed"):
@@ -416,6 +420,7 @@ def independent_evidence(state, settings, rnd):
 
 def settle(card, worktree):
     """Derive the round outcome from the ledger: accept, changes, or owner at the round cap."""
+    from . import findings
     with card.locked() as state:
         worktree, settings, tree = verify.prepare(state, worktree)
         last = state["rounds"][-1] if state["rounds"] else None
@@ -450,7 +455,7 @@ def settle(card, worktree):
                 "Confirm each blocker candidate once before settling: " + ", ".join(pending) + ". Use "
                 "`ai-dev-card confirm --finding KEY --file TEST:REPO_PATH -- COMMAND`, or "
                 "`ai-dev-card confirm --finding KEY --cannot-reproduce REASON`.", code=2)
-        blocking = sorted(k for k, e in ledger.items() if e["status"] in BLOCKING)
+        blocking = sorted(k for k, e in ledger.items() if e["status"] in BLOCKING or findings.inline_pending(e))
         limit = review["max_rounds"] + state["extra_rounds"]
         outcome = "accept" if not blocking else ("changes" if number < limit else "owner")
         folder = card.evidence(f"round-{number}")

@@ -91,6 +91,7 @@ class Continuity(CardCase):
         for old_status in ("discovery", "deferred"):
             with self.subTest(old_status=old_status):
                 if old_status == "deferred":
+                    findings.triage(self.card, key, "M", "followup", "Separate behavior change")
                     findings.resolve(self.card, self.repo, key, "deferred", "Existing baseline behavior", ticket=ticket)
                 target = Card("test", "rewrite-" + old_status)
                 continuity.inherit(target, self.card)
@@ -107,6 +108,7 @@ class Continuity(CardCase):
                                        files=[(path, name) for name, path in copied["files"].items()],
                                        argv=copied["argv"])
                 self.assertEqual(fresh["status"], "discovery")
+                findings.triage(target, key, "M", "followup", "Still requires separate work")
                 result = findings.resolve(target, self.repo, key, "deferred", "Still existing on the new base", ticket=ticket)
                 self.assertEqual(result["status"], "deferred")
 

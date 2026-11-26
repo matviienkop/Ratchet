@@ -60,6 +60,7 @@ def inherit(card, source_card):
                 entry["status"] = "candidate" if review._valid_violation(entry.get("violates"), contract) else "note"
         previous_ticket = (entry.pop("disposition", None) or {}).get("ticket")
         entry.pop("assessment", None)
+        entry.pop("triage", None)
         entry.pop("attempts", None)
         entry.pop("sources", None)
         entry.pop("require_reproduction", None)

@@ -20,18 +20,51 @@ def pending(state):
         if entry["status"] in ("fixed", "disproved", "waived", "resolved", "deferred"):
             continue
         required = (entry["status"] in (*review.BLOCKING, "candidate")
-                    or contractual(entry, state["contract"])
+                    or contractual(entry, state["contract"]) or baseline(entry)
                     or entry.get("severity") in ("medium", "high", "critical"))
         if required and not entry.get("disposition"):
             result.append(key)
     return sorted(result)
 
 
+def baseline(entry):
+    return (entry["status"] == "discovery" or (entry.get("confirm") or {}).get("result") == "discovery"
+            or entry.get("baseline") is True)
+
+
+def inline_pending(entry):
+    return entry["status"] == "discovery" and (entry.get("triage") or {}).get("decision") == "inline"
+
+
+def triage(card, key, size, decision, reason):
+    if size not in ("S", "M", "L", "XL") or not reason or not reason.strip():
+        raise CardError("Run ai-dev-card finding triage KEY --size S|M|L|XL --reason TEXT and explain scope and risk.")
+    with card.locked() as state:
+        entry = state["ledger"].get(key)
+        if (not entry or not baseline(entry) or entry["status"] not in ("discovery", "note")
+                or entry.get("needs_assessment") or entry.get("severity") not in ("low", "medium", "high", "critical")):
+            raise CardError("Use ai-dev-card finding list and confirm or assess the baseline finding before triage.")
+        decision = decision or ("inline" if size == "S" else "not-planned" if entry["severity"] == "low" else "followup")
+        if decision not in ("inline", "followup", "not-planned"):
+            raise CardError("Run ai-dev-card finding triage with --decision inline|followup|not-planned.")
+        if decision != "inline" and contractual(entry, state["contract"]):
+            raise CardError("The contract already promises this correction. Fix it or use ai-dev-card finding waive with the owner's approval.")
+        if decision == "not-planned" and entry["severity"] != "low":
+            raise CardError("Material defects need inline work or a follow-up. Run ai-dev-card finding triage again.")
+        proof = {"size": size, "severity": entry["severity"], "priority": {"critical": "P0", "high": "P1", "medium": "P2", "low": "P3"}[entry["severity"]],
+                 "decision": decision, "reason": reason, "at": now()}
+        entry["status"] = "discovery"
+        entry["triage"] = proof
+        entry["baseline"] = True
+        record(state, "finding.triaged", key=key, **proof)
+        return {"key": key, **proof, "next": "For inline work add the scenario and check to the contract, fix and verify; otherwise link the follow-up or record not-planned with finding resolve."}
+
+
 def completion_issue(state):
     keys = pending(state)
     if keys:
         return ("Findings still need an explicit disposition: " + ", ".join(keys)
-                + ". Run ai-dev-card finding list, then confirm, resolve or waive each finding; "
+                + ". Run ai-dev-card finding list, then confirm, triage, resolve or waive each finding; "
                   "a follow-up cannot discharge an unmet contract criterion.")
     return None
 
@@ -61,6 +94,9 @@ def import_finding(card, workspace, filename):
         entry.setdefault("sources", []).append({"url": payload["source"], "tree": tree, "digest": digest, "at": now()})
         # New evidence requires a fresh decision even when its mechanism has been seen before.
         entry.pop("disposition", None)
+        entry.pop("triage", None)
+        if payload["finding"]["class"] == "discovery":
+            entry["baseline"] = True
         if entry["status"] in ("fixed", "disproved", "waived", "resolved", "deferred"):
             entry["status"] = "note" if payload["finding"]["class"] == "blocker" else payload["finding"]["class"]
             entry.update({k: payload["finding"].get(k) for k in review.FIELDS})
@@ -102,6 +138,12 @@ def resolve(card, workspace, key, outcome, reason, evidence=None, ticket=None):
         if not entry or not rnd or rnd["tree"] != tree:
             raise CardError("Run ai-dev-card review brief and ai-dev-card finding list for the current candidate.")
         proof = {"outcome": outcome, "reason": reason, "tree": tree, "at": now()}
+        if baseline(entry):
+            assessment = entry.get("triage") or {}
+            wanted = {"resolved": "inline", "deferred": "followup", "not-planned": "not-planned"}[outcome]
+            if assessment.get("decision") != wanted or assessment.get("severity") != entry.get("severity"):
+                raise CardError("Analyze importance, size and scope before disposition. Run ai-dev-card finding triage KEY --size S|M|L|XL --decision " + wanted + " --reason TEXT.")
+            proof["triage"] = assessment
         if outcome == "deferred":
             site = urlsplit(ticket or "")
             if site.scheme != "https" or not site.hostname or site.username or site.password:
@@ -116,6 +158,8 @@ def resolve(card, workspace, key, outcome, reason, evidence=None, ticket=None):
             if contractual(entry, state["contract"]) or entry.get("severity") != "low" or entry["status"] not in ("note", "discovery"):
                 raise CardError("Only low non-contract notes can be not-planned. Run ai-dev-card finding list and confirm, fix or defer this finding.")
         else:
+            if baseline(entry) and (entry.get("confirm") or {}).get("argv"):
+                raise CardError("A reproduced baseline defect needs its test to pass. Run ai-dev-card verify and ai-dev-card review brief after the inline fix.")
             if entry["status"] not in ("gap", "note", "discovery") or not evidence:
                 raise CardError("A defect needs a reproduction, not a closure claim. Run ai-dev-card confirm --finding KEY -- COMMAND; for gaps use finding resolve --evidence FILE.")
             if not verify.passing_receipt(state, settings, tree, "pre_review"):
@@ -135,9 +179,9 @@ def late_return(card, workspace, reason):
     with card.locked() as state:
         _, _, tree = verify.prepare(state, workspace)
         rnd = state["rounds"][-1] if state["rounds"] else None
-        keys = sorted(k for k, e in state["ledger"].items() if e["status"] == "confirmed" and e.get("sources"))
+        keys = sorted(k for k, e in state["ledger"].items() if e["status"] == "confirmed" and e.get("sources") or inline_pending(e))
         if not rnd or rnd["tree"] != tree or rnd["outcome"] != "accept" or not keys:
-            raise CardError("Confirm the late defect on the accepted tree with ai-dev-card confirm --finding KEY -- COMMAND.")
+            raise CardError("Confirm the late defect or select an inline baseline correction with ai-dev-card finding triage before returning the accepted tree.")
         returns = state.setdefault("late_returns", [])
         run = os.environ.get("HERMES_KANBAN_RUN_ID") or os.environ.get("HERMES_SESSION_ID")
         if not run:

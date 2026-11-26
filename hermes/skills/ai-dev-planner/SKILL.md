@@ -57,11 +57,25 @@ The reviewer reproduces a finding that arrived after acceptance and blocks the c
 - At the limit: do not return the card and do not ask for a third return. Create one tracker ticket per remaining confirmed regression with its reproduction and links to the original ticket and pull request. Complete the card through its normal merge and release gates.
 - Hold every follow-up (regression tickets, advisory notes, baseline discoveries) unassigned or scheduled while the original card is open. A dependency on the original card alone does not hold them.
 - After the original card is done and its release is verified, take the follow-ups yourself, without asking the owner: one ticket at a time, each with its own tracker ticket, card, branch and pull request and through the full cycle. Regression tickets go first.
-- Classify before you file. Each follow-up ticket carries `priority:P0`..`P3`, `size:S`..`XL` and, for a defect, `severity:S1`..`S4`, as labels and as a line in its body; the review protocol defines the levels and the dispositions. An S4 finding gets no ticket of its own: list it as not planned with the reason, or fold several from one area into a single housekeeping ticket. Drop what was not reproduced. Report to the owner what you did not file and why.
+- Triage before you file: assess severity, size and risk, then choose inline work or a follow-up under the review protocol. Do not create a ticket solely because a defect exists on the base. Each chosen follow-up ticket carries `priority:P0`..`P3`, `size:S`..`XL` and, for a defect, `severity:S1`..`S4`, as labels and as a line in its body; the review protocol defines the levels and the dispositions. A small useful S4 fix may be inline; otherwise record not planned with the reason, or group related work into a justified housekeeping ticket. Keep unconfirmed claims distinct from reproduced defects. Report to the owner what you did not file and why.
 - Order the queue by priority, highest first, then by size, smallest first, then by ticket number. Re-sort it when a label changes.
 - Put that queue on the board, not in your memory. Create the card for every queued follow-up at once, each with its contract and tracker binding, and link each one as the child of the card before it with `kanban_link(parent_id=<previous>, child_id=<next>)`. Unblock them all: a card with an open parent waits in `todo`, and the dispatcher starts it when the parent is done. Your turn can then end without stalling the queue.
 
-Never edit panel reports, the contract or the gates. A change to ai-dev itself is a proposed diff; the operator deploys it. Attribute your own actions to yourself.
+Never edit panel reports or gate evidence. Amend contracts only through `contract set`, preserving existing criteria and the owner-approval rule for weakening them. A change to ai-dev itself is a proposed diff; the operator deploys it. Attribute your own actions to yourself.
+
+## Choosing inline work or a follow-up
+
+A baseline defect is not automatically a new ticket. Read its reproduction, assess the current severity and estimate the size and risk of fixing it. Record:
+
+```sh
+ai-dev-card --board BOARD --card CARD finding triage KEY --size S --decision inline --reason "Focused fix in the touched component with bounded behavior and a regression test"
+```
+
+Use size `S`, `M`, `L` or `XL` and decision `inline`, `followup` or `not-planned`. Omitting `--decision` selects inline for S; larger findings select follow-up, except low-severity ones select not planned. The ledger retains severity and derives priority. A small diff can still be risky: choose follow-up explicitly when the affected behavior, uncertainty or scope warrants separation, and explain why.
+
+For inline work, add its criterion or scenario and regression check through `contract set` before handing it to the author. Keep the same card, branch and PR. This selected work must be fixed and verified before completion; do not silently drop the choice later. Adding a criterion does not authorize weakening an existing one, changing delivery authority or exceeding the review limits.
+
+For a larger or riskier fix, reuse or create a follow-up with source evidence, scope rationale, severity, priority, size and a clear acceptance criterion. Then record `finding resolve KEY --outcome deferred --ticket HTTPS_URL --reason TEXT`. Its repair need not block completion of the original scope once the permitted disposition and required checks are satisfied. For low non-contract work whose cost is unjustified, record the matching not-planned disposition. The follow-up queue and its authorization remain as defined above.
 
 ## Publication after a merge
 
