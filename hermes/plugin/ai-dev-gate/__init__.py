@@ -31,6 +31,8 @@ def check(tool_name=None, args=None, **_):
         message = gate.decide(tool_name, args or {}, lane=gate.role(plugin_dir=HERE))
     except Exception as error:  # A broken install must not let a card through unchecked.
         message = f"ai-dev gate is not usable ({type(error).__name__}: {error}). Run `ai-dev-card doctor`."
+    if message:
+        analytics_event("gate", tool=tool_name, message=message)
     return {"action": "block", "message": message} if message else None
 
 
@@ -76,6 +78,7 @@ def register(ctx):
     os.environ["AI_DEV_PLUGIN_DIR"] = str(HERE)
     ctx.register_hook("pre_api_request", provider_attempt)
     ctx.register_hook("api_request_error", provider_error)
+    ctx.register_hook("post_api_request", api_completed)
     ctx.register_hook("pre_llm_call", observe_model)
     ctx.register_hook("pre_tool_call", check)
     ctx.register_hook("post_tool_call", audit)
@@ -90,10 +93,33 @@ def provider_attempt(model=None, provider=None, session_id=None, **_):
     attempt(Card(*identity()), gate.role(plugin_dir=HERE), model, provider, session_id)
 
 
-def provider_error(model=None, provider=None, reason=None, status_code=None, session_id=None, **_):
+def provider_error(model=None, provider=None, reason=None, status_code=None, session_id=None, **metadata):
+    analytics_event("api", status="error", model=model, provider=provider, reason=reason,
+                    status_code=status_code, session_id=session_id, **metadata)
     if not os.getenv("HERMES_KANBAN_TASK"):
         return
     gate = _gate()
     from ai_dev.store import Card, identity
     from ai_dev.model_events import failure
     failure(Card(*identity()), gate.role(plugin_dir=HERE), model, provider, session_id, reason, status_code)
+
+
+def analytics_event(kind, **metadata):
+    if not os.getenv("HERMES_KANBAN_TASK"):
+        return
+    try:
+        _gate()
+        from ai_dev import analytics
+        from ai_dev.store import Card, identity
+        card = Card(*identity())
+        if kind == "gate":
+            analytics.observe_gate(card, **metadata)
+        else:
+            analytics.observe_api(card, **metadata)
+    except Exception as error:
+        import logging
+        logging.getLogger(__name__).warning("Analytics observation failed: %s", type(error).__name__)
+
+
+def api_completed(**metadata):
+    analytics_event("api", status="ok", **metadata)

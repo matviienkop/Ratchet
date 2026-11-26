@@ -173,7 +173,7 @@ def resolve(card, workspace, key, outcome, reason, evidence=None, ticket=None):
         entry["disposition"] = proof
         entry["status"] = "deferred" if outcome == "deferred" else "resolved"
         entry["needs_assessment"] = False
-        entry["history"].append({"round": rnd["n"], "status": entry["status"], "by": "disposition", **proof})
+        entry["history"].append({"at": now(), "round": rnd["n"], "status": entry["status"], "by": "disposition", **proof})
         record(state, "finding.disposition", key=key, **proof)
         return {"key": key, "status": entry["status"], "disposition": proof}
 

@@ -76,6 +76,8 @@ class Install(unittest.TestCase):
         done = subprocess.run([str(self.root / "bin" / "ai-dev-card"), "doctor"], capture_output=True, text=True,
                               env={**os.environ, "AI_DEV_HOME": str(self.root / "home")})
         self.assertEqual(json.loads(done.stdout)["version"], "2.0.0")
+        from ai_dev.analytics import workflow_fingerprint
+        self.assertEqual((self.root / "prefix/ai_dev/workflow.sha256").read_text().strip(), workflow_fingerprint())
 
     def test_onboarding_tools_get_the_workspace_default(self):
         self.assertEqual(self.run_install("--workspace", str(self.root / "projects")), 0)

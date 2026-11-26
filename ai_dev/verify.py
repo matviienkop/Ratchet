@@ -226,6 +226,8 @@ def verify(card, worktree, stage="pre_review", rerun=False):
         previous = passing_receipt(state, settings, tree, stage)
         if previous and not rerun:
             return previous, 0
+        started = time.monotonic()
+        started_at = now()
         number = len(state["verifications"]) + 1
         commit = gitio.anchor(worktree, f"{card.board}/{card.id}/v{number}", tree, state["base"])
         folder = card.evidence(f"verify-{number}")
@@ -272,7 +274,8 @@ def verify(card, worktree, stage="pre_review", rerun=False):
             result = "defect"
         else:
             result = "environment"
-        receipt = {"id": number, "at": now(), "stage": stage, "tree": tree, "commit": commit, "base": state["base"],
+        receipt = {"id": number, "at": now(), "started": started_at,
+                   "duration_seconds": time.monotonic() - started, "stage": stage, "tree": tree, "commit": commit, "base": state["base"],
                    "patch_sha256": hashlib.sha256(patch).hexdigest(), "checks": results,
                    "checks_digest": checks_digest(checks), "passed": result == "passed", "result": result,
                    "problem": ("The working tree changed while checks ran: " + ", ".join(touched[:8]) + ". If a check "

@@ -11,6 +11,7 @@ from . import __version__, gate, gitio, policy as policies, release, review, sev
 from . import recovery, recovery_wake, findings, continuity
 from .stand_cli import add_command as add_stand_command
 from .history import add_commands as add_history_commands
+from .analytics import add_command as add_analytics_command
 from .store import Card, CardError, home, identity
 
 
@@ -196,6 +197,7 @@ def main(argv=None):
     parser.add_argument("--workspace", help="Working tree. Defaults to HERMES_KANBAN_WORKSPACE, then the current directory.")
     commands = parser.add_subparsers(dest="command", required=True)
     add_history_commands(commands, _card)
+    add_analytics_command(commands, _card)
     add_stand_command(commands, _card, _workspace)
     commands.add_parser("recovery-wake", help="Wake due provider-capacity waits.").set_defaults(run=lambda _: recovery_wake.tick())
     sub = commands.add_parser("recover", help="Dispatch one diagnosis and resume the failed acceptance step.")
