@@ -112,6 +112,7 @@ def history(card, args):
               "events": events[-args.limit:]}
     if args.details:
         output["evidence"] = {k: state[k] for k in ("base", "contract", "verifications", "rounds", "ledger")}
+        output["evidence"].update({k: state.get(k, []) for k in ("analyses", "plans", "preflight_history")})
         output["evidence"]["ledger"] = {k: {**e, **describe(e)} for k, e in state["ledger"].items()}
         activity = card.dir / "activity.sqlite"
         output["tools"] = []

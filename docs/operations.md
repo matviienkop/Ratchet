@@ -164,3 +164,7 @@ When the owner chooses a fresh implementation card, run `ai-dev-card contract in
 ## Before implementation
 
 Configure and run [project preflight](preflight.md) to establish environment readiness and baseline test discovery before source edits. Its receipts and failure assessments are separate from candidate acceptance and do not consume correction attempts.
+
+## Before implementation planning
+
+Use [task analysis](task-analysis.md) for tickets and requests received directly in chat. Enable `require_task_analysis: true` in defaults or repository policy to require ready analysis and a current implementation plan at verification and board handoff. Configure source access per project; no database or observability connector is assumed to exist.

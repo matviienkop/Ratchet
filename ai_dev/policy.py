@@ -34,6 +34,7 @@ DEFAULTS = {
     "check_timeout": 900,
     "base_probe": True,
     "preflight": None,
+    "require_task_analysis": False,
     "max_defect_failures": 5,
     "max_attempts": 5,
     "delivery": "local",
@@ -107,6 +108,8 @@ def load(repo=None, origin=None):
         release.validate(result["release"])
     if result["pr_ci"] is not None:
         release.validate_pr_ci(result["pr_ci"])
+    if type(result["require_task_analysis"]) is not bool:
+        raise CardError("Set require_task_analysis to true or false in project policy; run ai-dev-card doctor.")
     if type(result["require_scenario_evidence"]) is not bool:
         raise CardError("Set require_scenario_evidence to true or false in the policy, then run ai-dev-card doctor.")
     from .preflight import validate as validate_preflight

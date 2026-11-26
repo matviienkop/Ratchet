@@ -1433,3 +1433,110 @@ class ProjectPreflight(CardCase):
             self.assertEqual(preflight.run(self.card,self.repo)[1],0)
         self.assertEqual(prepare.call_args.args[3],b'')
         self.assertEqual(call.call_args.args,(driver,'shutdown'))
+
+
+class TaskAnalysis(CardCase):
+    def analysis(self, kind='chat', **changes):
+        return {'source': {'kind':kind,'reference':'thread/message-1','text':'Fix division'},
+                'title':'Handle zero','problem':'Unclear zero behavior','outcome':'Predictable error',
+                'repository':str(self.repo),'scope':['division'], 'non_goals':[],
+                'criteria':CONTRACT['criteria'], 'constraints':[], 'facts':['Read calc.py'], 'hypotheses':[],
+                'evidence':[{'source':'code','question':'Current behavior?','status':'checked','reference':'base:calc.py','summary':'No zero guard'}],
+                'unknowns':[], 'risks':[{'area':'compatibility','assessment':'Preserve ordinary addition'}],
+                'decomposition':{'decision':'single','reason':'One behavior','children':[]},
+                'budget':{'minutes':15,'used_minutes':3}, 'readiness':'ready', **changes}
+
+    def plan(self, revision=1):
+        from ai_dev import intake
+        return intake.save_plan(self.card, {'analysis_revision':revision,'steps':['Add zero guard'],
+            'validation':['Run regression test'], 'rollback':'Revert candidate before release', 'authority':'Owner message-1'})
+
+    def test_chat_and_ticket_use_same_gate(self):
+        from ai_dev import intake
+        for kind in ('chat','ticket'):
+            self.card=Card('test',kind)
+            os.environ['HERMES_KANBAN_TASK']=kind
+            self.set_policy(require_task_analysis=True)
+            self.contract()
+            self.assertIn('not ready',self.decide('kanban_request_review','coder'))
+            intake.save_analysis(self.card,self.analysis(kind))
+            self.assertIn('plan is missing',intake.issue(self.card.load(),policy.load(),self.repo))
+            self.plan()
+            self.implement()
+            self.verified()
+            self.assertIsNone(intake.issue(self.card.load(),policy.load(),self.repo))
+
+    def test_blocking_unknown_prevents_ready_and_plan(self):
+        from ai_dev import intake
+        data=self.analysis(unknowns=[{'question':'Required error type?','blocking':True,'next_step':'Ask owner'}])
+        with self.assertRaisesRegex(CardError,'Resolve blocking'):
+            intake.save_analysis(self.card,data)
+        data['readiness']='needs_input'
+        intake.save_analysis(self.card,data)
+        with self.assertRaisesRegex(CardError,'before planning'):
+            self.plan()
+
+    def test_reanalysis_invalidates_plan_and_repeated_save_is_idempotent(self):
+        from ai_dev import intake
+        self.set_policy(require_task_analysis=True)
+        self.contract()
+        data=self.analysis()
+        intake.save_analysis(self.card,data)
+        self.plan()
+        self.assertEqual(intake.save_analysis(self.card,data)['revision'],1)
+        data['facts'].append('New relevant owner clarification')
+        self.assertEqual(intake.save_analysis(self.card,data)['revision'],2)
+        self.assertIn('stale',intake.issue(self.card.load(),policy.load(),self.repo))
+        with self.assertRaisesRegex(CardError,'before planning'):
+            self.plan(1)
+        self.plan(2)
+        self.assertIsNone(intake.issue(self.card.load(),policy.load(),self.repo))
+
+    def test_original_chat_source_cannot_be_silently_rewritten(self):
+        from ai_dev import intake
+        intake.save_analysis(self.card,self.analysis())
+        data=self.analysis()
+        data['source']['text']='A different scope'
+        with self.assertRaisesRegex(CardError,'Preserve the original'):
+            intake.save_analysis(self.card,data)
+
+    def test_contract_and_repository_must_match_analysis(self):
+        from ai_dev import intake
+        self.set_policy(require_task_analysis=True)
+        self.contract()
+        intake.save_analysis(self.card,self.analysis(repository='/different/repo'))
+        self.plan()
+        self.assertIn('another repository',intake.issue(self.card.load(),policy.load(),self.repo))
+        intake.save_analysis(self.card,self.analysis(criteria=['Different promise']))
+        self.plan(2)
+        self.assertIn('disagree',intake.issue(self.card.load(),policy.load(),self.repo))
+        self.implement()
+        with self.assertRaisesRegex(CardError,'disagree'):
+            verify.verify(self.card,self.repo)
+
+    def test_split_root_cannot_get_implementation_plan(self):
+        from ai_dev import intake
+        data=self.analysis(readiness='split',decomposition={'decision':'split','reason':'Two repositories','children':['test/a','test/b']})
+        intake.save_analysis(self.card,data)
+        with self.assertRaisesRegex(CardError,'before planning'):
+            self.plan()
+
+    def test_unavailable_optional_source_does_not_require_fabricated_evidence(self):
+        from ai_dev import intake
+        data=self.analysis()
+        data['evidence'].append({'source':'grafana','question':'Any impact spike?','status':'unavailable',
+                                 'summary':'No project connector; reproduction is sufficient for this scope'})
+        intake.save_analysis(self.card,data)
+        self.plan()
+        self.assertEqual(len(self.card.load()['analyses']),1)
+
+    def test_checked_sources_require_reference_and_redact_credentials(self):
+        from ai_dev import intake
+        data=self.analysis()
+        data['evidence'][0].pop('reference')
+        with self.assertRaisesRegex(CardError,'reference'):
+            intake.save_analysis(self.card,data)
+        data=self.analysis()
+        data['source']['text']='Fix failure password=secret-value'
+        row=intake.save_analysis(self.card,data)
+        self.assertNotIn('secret-value',json.dumps(row))

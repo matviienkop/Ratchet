@@ -8,7 +8,7 @@ import shutil
 import sys
 
 from . import __version__, gate, gitio, policy as policies, release, review, severity, stands, verify
-from . import preflight, recovery, recovery_wake, findings, continuity
+from . import intake, preflight, recovery, recovery_wake, findings, continuity
 from .stand_cli import add_command as add_stand_command
 from .history import add_commands as add_history_commands
 from .analytics import add_command as add_analytics_command
@@ -91,7 +91,7 @@ def status(args):
                 break
     if settings and state["contract"]:
         result["preflight"] = state.get("preflight")
-        step = preflight.issue(state, settings) or step
+        step = intake.issue(state, settings, workspace) or preflight.issue(state, settings) or step
     result["next"] = step
     return result, 0
 
@@ -207,6 +207,7 @@ def main(argv=None):
     pre.add_argument("--reason")
     pre.add_argument("--evidence")
     pre.set_defaults(run=lambda args: preflight.command(args, _card(args), _workspace(args)))
+    intake.add_commands(commands, _card)
     add_history_commands(commands, _card)
     add_analytics_command(commands, _card)
     add_stand_command(commands, _card, _workspace)

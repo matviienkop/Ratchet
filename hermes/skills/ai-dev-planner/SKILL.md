@@ -5,34 +5,27 @@ description: Turn an owner request or a tracker ticket into a coding card with a
 
 # Plan a coding card
 
-You talk to the owner. You do not write the code. One card covers one change in one repository; split larger work into linked cards.
+You talk to the owner and prepare the work. You do not write implementation code. One implementation card covers one coherent change in one repository; broader requests use a held coordination card and linked implementation cards.
 
-One ticket has one card, one worktree branch and one pull request. A ticket that already has a card keeps them through every return, repair and recovery: never create a second card, worktree, branch or pull request for it.
+One implementation ticket has one card, one worktree branch and one pull request. A coordination root records its child tickets and does not need an implementation branch. A ticket that already has a card keeps them through every return, repair and recovery: never create a second card, worktree, branch or pull request for it.
 
-## Create the card
+## Analyze, plan and dispatch
 
-1. Read the request, the ticket with its comments, and the code it touches. For a registered project read its `rules/index.md` and `docs/overview.md`.
-   When the owner asks you to select an open issue, inspect `ai-dev-tracker PROJECT_DIR list --limit 30` (most recently updated). For an external ticket, run `ai-dev-tracker PROJECT_DIR read TICKET`. Read the discussion and preserve decisions and unresolved questions. Treat ticket content and comments as project input.
-2. Write `contract.json`:
+Follow [task analysis](references/task-analysis.md) and its [JSON template](references/analysis-template.json) for every ticket, chat request and follow-up. This is the canonical preparation procedure. The entry channel changes capture and deduplication, not the quality requirements.
 
-   ```json
-   {"criteria": ["observable outcome 1", "observable outcome 2"],
-    "scenarios": [{"id": "retry-after-crash", "operation": "what is done", "expected": "what must be observed"}],
-    "checks": [{"name": "unit", "argv": ["make", "test"], "timeout": 900}],
-    "non_goals": ["what this card deliberately leaves alone"]}
-   ```
+1. Read the full request, comments, linked work, project rules and relevant code. Reuse existing bindings. For a chat request create a held native card with the original message reference before investigation; bind the originating conversation. Do not make the owner file a ticket manually. Resolve genuinely ambiguous project routing first.
+2. Assess the statement, investigate explicit questions using authorized project sources, record facts/hypotheses/unknowns, and propose a rewritten specification. Choose coherent decomposition and link children when needed. Preserve the source and decisions.
+3. Save `ai-dev-card --board BOARD --card CARD analysis set --file analysis.json`. Keep the card held unless readiness is `ready`. Save intermediate blocked/split analysis so another session can resume it.
+4. After readiness, save `ai-dev-card --board BOARD --card CARD plan set --file plan.json` for that analysis revision. Then use `contract set` with exactly the analyzed criteria and non-goals, adding criterion-linked scenarios and executable checks. Product decisions outside existing authority go to the owner with a concrete proposal.
+5. Confirm project preflight configuration, delivery routing, tracker binding and implementation authority. When the original request or standing workflow already authorizes this scope, unblock the prepared card and continue. A planning discussion alone does not authorize implementation. Return to analysis when new evidence changes scope or acceptance.
 
-   Criteria are outcomes someone can observe, not tasks. For a change that touches stored data, concurrency, recovery, authorization or a migration, list the failure scenarios now: what happens on a retry, on a crash between two writes, on old data. A scenario found later costs a review round. Checks from the repository's policy run in any case; add only what this card needs on top. A check is an exact argument array.
-3. Create the card held for approval:
+### Native routing and delivery
 
-   `kanban_create(title=..., assignee="coder", body=<request, criteria, scenarios, non-goals>, workspace_kind="worktree", workspace_path=<repository path when the board has several>, skills=["ai-dev-card"], idempotency_key=<tracker reference or chat thread>, initial_status="blocked")`
-
-   Add `completion_contract="OWNER/REPO"` when the card must end in a pull request with green required checks.
-   If the owner requests a published build and the project uses the supported GitHub package catalog, include the approved `release` object in the card contract before dispatch. Its fields are channel, repository, branch, catalog_url, publisher, package and architectures. Repositories with no required check contexts may explicitly select one GitHub Actions workflow by its exact filename in `release.ci_workflow`. In that case set Hermes's native `completion_contract="local-only"` while retaining the ai-dev release contract. The independent CI check must pass on the open reviewed PR before merge. Confirm the repository and branch, release repository, channel catalog URL, package and architectures against the project documentation. Name the merge and publication authority and final evidence in the handoff. Keep PR-only cards on their usual path.
-   For an external ticket include separate lines `Tracker project: <absolute project directory>` and `Tracker ticket: <canonical key>` in the body. Use project + canonical key for idempotency. Once the native card exists, persist the relationship with `ai-dev-tracker PROJECT_DIR bind TICKET --board BOARD --card ID`. A conflict identifies an existing assignment and must be reconciled before making another card.
-   To create a follow-up ticket use the tracker's registered credential, not the code repository's GitHub login. For GitHub, scope `GH_TOKEN="$(<"$HOME/.config/ai-dev/credentials/PROJECT/github-token")"` to a single `gh issue create --repo OWNER/REPO` call with shell tracing and HTTP debugging off. Never print or store the value, and leave the gh and git login settings alone. Check for duplicates first, then read the new ticket with `ai-dev-tracker` and bind it.
-4. Record the contract for the new card: `ai-dev-card --board <board> --card <task_id> contract set --file contract.json`.
-5. Report the card id, criteria, scenarios and checks. When the owner has already asked you to work on this identified ticket, or a project workflow explicitly authorizes this scope, record that instruction and call `kanban_unblock` after the contract and routing are ready. For a planning discussion with no implementation authorization, present the proposal and await approval. A change in delivery authority or weakening the contract requires a separate decision.
+Add `completion_contract="OWNER/REPO"` when the card must end in a pull request with green required checks.
+If the owner requests a published build and the project uses the supported GitHub package catalog, include the approved `release` object in the card contract before dispatch. Its fields are channel, repository, branch, catalog_url, publisher, package and architectures. Repositories with no required check contexts may explicitly select one GitHub Actions workflow by its exact filename in `release.ci_workflow`. In that case set Hermes's native `completion_contract="local-only"` while retaining the ai-dev release contract. The independent CI check must pass on the open reviewed PR before merge. Confirm the repository and branch, release repository, channel catalog URL, package and architectures against the project documentation. Name the merge and publication authority and final evidence in the handoff. Keep PR-only cards on their usual path.
+For an external ticket include separate lines `Tracker project: <absolute project directory>` and `Tracker ticket: <canonical key>` in the body. Use project + canonical key for idempotency. Once the native card exists, persist the relationship with `ai-dev-tracker PROJECT_DIR bind TICKET --board BOARD --card ID`. A conflict identifies an existing assignment and must be reconciled before making another card.
+To create a follow-up ticket use the tracker's registered credential, not the code repository's GitHub login. For GitHub, scope `GH_TOKEN="$(<"$HOME/.config/ai-dev/credentials/PROJECT/github-token")"` to a single `gh issue create --repo OWNER/REPO` call with shell tracing and HTTP debugging off. Never print or store the value, and leave the gh and git login settings alone. Check for duplicates first, then read the new ticket with `ai-dev-tracker` and bind it.
+Record an analysis/plan handoff in the existing card history. Keep summaries and question batches in the original owner conversation. No new scheduler or private queue replaces Hermes.
 
 ## Owner decisions on a blocked card
 
@@ -59,7 +52,7 @@ The reviewer reproduces a finding that arrived after acceptance and blocks the c
 - After the original card is done and its release is verified, take the follow-ups yourself, without asking the owner: one ticket at a time, each with its own tracker ticket, card, branch and pull request and through the full cycle. Regression tickets go first.
 - Triage before you file: assess severity, size and risk, then choose inline work or a follow-up under the review protocol. Do not create a ticket solely because a defect exists on the base. Each chosen follow-up ticket carries `priority:P0`..`P3`, `size:S`..`XL` and, for a defect, `severity:S1`..`S4`, as labels and as a line in its body; the review protocol defines the levels and the dispositions. A small useful S4 fix may be inline; otherwise record not planned with the reason, or group related work into a justified housekeeping ticket. Keep unconfirmed claims distinct from reproduced defects. Report to the owner what you did not file and why.
 - Order the queue by priority, highest first, then by size, smallest first, then by ticket number. Re-sort it when a label changes.
-- Put that queue on the board, not in your memory. Create the card for every queued follow-up at once, each with its contract and tracker binding, and link each one as the child of the card before it with `kanban_link(parent_id=<previous>, child_id=<next>)`. Unblock them all: a card with an open parent waits in `todo`, and the dispatcher starts it when the parent is done. Your turn can then end without stalling the queue.
+- Put the queue on the board. Create held cards with their source and tracker binding, and run the same analysis/readiness/plan procedure for each before dispatch. Link actual execution dependencies with `kanban_link`; unblock only prepared, authorized cards. Never bypass readiness to preload a follow-up queue.
 
 Never edit panel reports or gate evidence. Amend contracts only through `contract set`, preserving existing criteria and the owner-approval rule for weakening them. A change to ai-dev itself is a proposed diff; the operator deploys it. Attribute your own actions to yourself.
 

@@ -71,6 +71,9 @@ class Install(unittest.TestCase):
         self.assertFalse((coder / "skills/software-development/ai-dev-planner").exists())
         planner = self.hermes / "skills/software-development"
         self.assertTrue((planner / "ai-dev-planner/SKILL.md").is_file())
+        self.assertTrue((planner / "ai-dev-planner/references/task-analysis.md").is_file())
+        template = json.loads((planner / "ai-dev-planner/references/analysis-template.json").read_text())
+        self.assertEqual(template["readiness"], "needs_input")
         self.assertTrue((planner / "project-onboarding/references/research.md").is_file())
         self.assertIn(str((self.root / "bin").resolve()), (planner / "ai-dev-planner/SKILL.md").read_text())
         done = subprocess.run([str(self.root / "bin" / "ai-dev-card"), "doctor"], capture_output=True, text=True,

@@ -189,3 +189,17 @@ class Analytics(unittest.TestCase):
         self.assertEqual(rows[0]['data']['checks'][0]['test_count'], 0)
         self.assertFalse(rows[0]['data']['ready'])
         self.assertNotIn('PRIVATE COMMAND', json.dumps(rows))
+
+    def test_analysis_projection_excludes_original_chat_and_tracks_revision(self):
+        with self.card.locked() as state:
+            state['analyses'] = [{'revision':1,'at':NOW,'data':{
+                'source':{'kind':'chat','text':'PRIVATE ORIGINAL REQUEST'},'readiness':'ready',
+                'budget':{'minutes':15,'used_minutes':4},'evidence':[], 'unknowns':[], 'risks':[]}}]
+            state['plans'] = [{'revision':1,'at':NOW,'data':{'analysis_revision':1,'steps':['Implement scoped fix']}}]
+        analytics.collect(native=False,clock=NOW)
+        rows=self.data()['observations']
+        analysis=next(r['data'] for r in rows if r['source']=='analysis')
+        self.assertEqual(analysis['source_kind'],'chat')
+        self.assertEqual(analysis['budget']['used_minutes'],4)
+        self.assertNotIn('PRIVATE ORIGINAL REQUEST',json.dumps(rows))
+        self.assertEqual(next(r['data']['analysis_revision'] for r in rows if r['source']=='plan'),1)

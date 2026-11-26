@@ -51,6 +51,10 @@ def _card(env):
     state = Card(board, card).load()
     if state["contract"]:
         verify.scenario_evidence(state["contract"], settings)
+        from . import intake
+        problem = intake.issue(state, settings, workspace)
+        if problem:
+            raise CardError(problem)
         from .preflight import issue
         problem = issue(state, settings)
         if problem:
