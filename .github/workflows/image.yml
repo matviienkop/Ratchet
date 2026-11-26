@@ -2,7 +2,8 @@ name: Image
 
 # Builds the bot image from the newest Hermes Agent release and this repository,
 # runs the smoke test, and publishes to the GitHub Container Registry.
-# A pull request builds and tests without publishing.
+# A pull request builds without publishing, and only when it touches the image definition:
+# the unit tests for every pull request run in tests.yml.
 
 on:
   push:
@@ -17,12 +18,7 @@ on:
       - ".github/workflows/image.yml"
   pull_request:
     paths:
-      - "ai_dev/**"
-      - "bin/**"
       - "docker/**"
-      - "hermes/**"
-      - "stands/**"
-      - "tests/**"
       - ".dockerignore"
       - ".github/workflows/image.yml"
   schedule:
