@@ -810,6 +810,22 @@ class Panel(CardCase):
         state["log"].append({"event": "model.attempt", "lane": "coder", "model": "gpt-6-sol"})
         self.assertIsNone(review_routes.reserve(state, config, rnd, slot, set()))
 
+    def test_safety_filter_refusal_moves_the_review_to_another_provider(self):
+        from ai_dev import policy, review_routes
+        member = {"output": "hermes-usage", "model": "gpt-6-astra"}
+        refusal = b"This content was flagged for possible cybersecurity risk. Try rephrasing your request."
+        done = subprocess.CompletedProcess([], 1, b"", refusal)
+        self.assertEqual(review_routes.runner_failure(done, member, Path("missing"))[0], "provider_refused")
+        crash = subprocess.CompletedProcess([], 1, b"", b"Traceback: the reviewer discussed a content policy")
+        self.assertEqual(review_routes.runner_failure(crash, member, Path("missing"))[0], "process_failure")
+        config = policy.DEFAULTS["review"]
+        slot = config["panel"][0]
+        state = {"log": [{"event": "model.attempt", "lane": "coder", "model": "gpt-6.2-astra"}]}
+        rnd = {"panel": {slot["name"]: {"error_class": "provider_refused", "status": "unavailable",
+                                         "provider": "openai-codex", "model": "gpt-6-astra"}}}
+        peer = review_routes.reserve(state, config, rnd, slot, set())
+        self.assertEqual(review_routes.PROVIDERS[peer["output"]], "anthropic")
+
     def test_sdk_rejected_model_is_a_provider_outage(self):
         from ai_dev import policy, review_routes
         member = {"output": "claude-json", "model": "claude-fable-5-2"}
