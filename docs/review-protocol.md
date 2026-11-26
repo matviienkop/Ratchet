@@ -176,3 +176,72 @@ Hermes can answer a pinned OpenAI reviewer through its fallback provider when th
 An author is excluded by model family for the entire card. This includes fallback models used during coding. For example, a change written by GPT-6.2 Astra excludes all Astra versions and context-window variants, including GPT-6 Astra. With the subscription panel an Astra implementation routes both review slots to Claude Fable 5.2 and Claude Opus 5.5. They run in independent processes on the same tree. Both are configured as frontier peers. If both slots use Anthropic the summary records reduced provider diversity. Author independence takes precedence over provider diversity.
 
 GPT-6.2 Sol is an explicitly approved reserve for either slot. It can replace an unavailable Claude reviewer while the other independent reviewer remains active. The configured tier expresses review policy, not a benchmark result.
+
+
+## Repairing a settled Go overlay incident
+
+Go confirmation and ordinary rechecks use one local package and one named
+top-level test, for example
+`ai-dev-card confirm --finding KEY -- go test ./pkg -run '^TestName$' -timeout=30s`.
+Ratchet requests JSON output and disables the test cache. It preserves a positive
+decimal `-count` (default 1), `-timeout`, `-tags`, `-parallel`, `-shuffle`, `-vet`,
+`-short`, `-race` and `-cover`. Each option may appear once. A bare test name is
+replayed with Go's original substring semantics, but is conclusive only if
+exactly that top-level test runs and finishes the requested number of times.
+A selector that also runs another top-level test is inconclusive. Other options
+and selectors are not replayed silently. The runner uses the local Go toolchain and cached or vendored
+dependencies, without using Go environment config, `GOFLAGS` or workspace mode.
+
+A compile or setup failure, timeout, skipped test, or zero tests leaves the finding
+unresolved. A fixture may add a new file but may not replace a checked-out path.
+When the destination already contains a byte-identical regular tracked file,
+Ratchet uses that file without rewriting it. If a new confirmation is inconclusive,
+fix the reproduction and run `confirm` again. If an already confirmed finding has
+an inconclusive recheck, it remains blocking. Inspect the recheck log and bring
+unsupported stored commands to the maintainer and owner rather than stripping
+flags or treating the finding as fixed. This classification applies to direct
+`go test`, not commands that wrap the Go runner.
+
+For the narrow legacy case where a single stale Go overlay is the sole confirmed
+blocker of the latest settled `changes` round, a maintainer with local card-state
+access and explicit owner approval may run:
+
+```sh
+ai-dev-card --card CARD --board BOARD --workspace REPO review supersede-evidence \
+  --finding KEY --round N --tree TREE --old-sha256 SHA256 \
+  --test TestName --owner-ref MESSAGE --reason TEXT
+```
+
+`SHA256` is the digest of the stored recheck log for that exact round. The owner
+message must approve the finding, tree, old log and named replacement test. Run
+outside the Kanban worker or role-specific environment. This is a local privileged
+operation, not a new authentication mechanism: the reference records approval;
+Ratchet does not fetch or authenticate the owner message. The operator must check
+that the tracked test covers the same behavior before running the command. The
+rerun uses the recorded commit and the same tracked destination, package and exact
+named selector as the recorded reproduction. This path does not accept the extra
+options supported by ordinary Go confirmation and recheck. Go's build file list and source parser
+must identify a unique declaration in that exact tracked file; the audit records the
+file and Git blob. A matching name in another file, or a matching declaration excluded
+by build constraints, does not qualify. The test runs without an overlay, using an
+offline Go toolchain with dependencies already available locally. Unsupported or mixed
+legacy logs and changed hashes are refused. A replacement failure or inconclusive
+run is logged but leaves the blocker in place.
+
+A passing replacement preserves the original logs, fixtures, reports and verdict.
+It records an audited correction and requires new verification and a full review
+on the same tree, with the configured reviewer or independent panel. The old
+verdict cannot authorize a return or completion while the fresh round is pending.
+The coder gate and review brief both require the exact repaired tree until that
+review is underway; an open repaired round must also settle on that tree. If
+panel routes change, the next round on that tree is still a full review linked
+to the repair, and the replacement log must still match its audited digest.
+On later trees, an inconclusive tracked recheck leaves the finding blocking;
+`--cannot-reproduce` is not an alternative to a passing recheck or owner waiver.
+On the repaired tree, only receipts newer than the repair and matching the current
+checks for their stage can satisfy the gate or trigger recovery. Older or retired
+receipts remain in history. If policy requires post-review checks, rerun them after
+the new acceptance; only receipts bound to that accepted round apply. Later rechecks
+verify the same tracked path; a new fix
+brief cites the current recheck instead of directing anyone to restore the stale
+fixture. The command neither approves the candidate nor changes attempt limits or Kanban status.

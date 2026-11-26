@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import fcntl
+import getpass
 import hashlib
 import json
 import os
@@ -11,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 
-from . import gitio, policy, release, review_routes, review_summary, severity, verify
+from . import gitio, policy, release, review_routes, review_summary, reproduction, severity, verify
 from .redact import sanitize
 from .store import CardError, now, record
 
@@ -145,37 +146,225 @@ def _merge(state, rnd, reviewer, report):
     return keys
 
 
-def _reproduce(worktree, commit, files, argv, log, timeout):
+def _tracked_regular_blob(worktree, commit, destination):
+    entry = gitio.git(worktree, "--literal-pathspecs", "ls-tree", "-z", commit, "--", destination)
+    match = re.fullmatch(rb"100(?:644|755) blob ([0-9a-f]+)\t" + re.escape(os.fsencode(destination)) + rb"\x00", entry)
+    return match[1].decode("ascii") if match else None
+
+
+def _reproduce(worktree, commit, files, argv, log, timeout, *, tracked_test=None):
+    def unresolved(problem):
+        log.write_text(problem + "\n")
+        return {"exit_code": None, "problem": problem, "klass": "environment", "seconds": 0, "log": str(log)}
+
+    go = reproduction.is_go(argv)
+    structured = reproduction.structured(argv, ordinary=tracked_test is None) if go else None
+    if go and not structured:
+        return unresolved("Use one named top-level Go test in one local package with supported options. "
+                          "See docs/review-protocol.md before retrying ai-dev-card confirm or escalating a stored proof.")
+    binding = {}
     with gitio.checkout(worktree, commit) as folder:
         for destination, stored in files.items():
-            target = folder / destination
+            relative = Path(destination)
+            target = folder / relative
+            collision = (f"Overlay destination {destination} collides with the checkout. "
+                         "Use a new test path or a tracked test with no overlay.")
+            if (relative.is_absolute() or ".." in relative.parts or ".git" in relative.parts
+                    or any(p.is_symlink() for p in (target, *target.parents) if p != folder)
+                    or any(p.exists() and not p.is_dir() for p in target.parents)):
+                return unresolved(collision)
+            if target.exists():
+                blob = _tracked_regular_blob(worktree, commit, destination) if target.is_file() else None
+                if blob:
+                    try:
+                        data = Path(stored).read_bytes()
+                        if target.read_bytes() == data == gitio.git(worktree, "cat-file", "blob", blob):
+                            # The fix may already include the supplied fixture; use it without writing it.
+                            continue
+                    except OSError:
+                        pass
+                return unresolved(collision)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(stored, target)
-        code, problem, klass, seconds = verify.run(argv, folder, log, timeout)
-    return {"exit_code": code, "problem": problem, "klass": klass, "seconds": seconds, "log": str(log)}
+        if structured:
+            command, test, count = structured
+            if tracked_test is not None:
+                blob = _tracked_regular_blob(worktree, commit, tracked_test)
+                source = folder / tracked_test
+                if (not blob or files or source.resolve() != source or not source.is_file()
+                        or source.read_bytes() != gitio.git(worktree, "cat-file", "blob", blob)
+                        or not reproduction.go_declared_in(verify.run, command[0], folder, command[-1], test, source, timeout)):
+                    return unresolved(f"Cannot bind {test} to tracked test {tracked_test} in this Go build. "
+                                      "Inspect that file and its build constraints before rerunning review.")
+                binding = {"tracked_test": tracked_test, "tracked_blob": blob, "argv": command}
+            code, problem, klass, seconds = verify.run(command, folder, log, timeout, reproduction.GO_ENV)
+            if klass != "environment":
+                klass = reproduction.go_result(log, code, test, count)
+                if klass == "environment":
+                    problem = f"No conclusive Go result for {test}. Inspect the log and rerun ai-dev-card confirm."
+        else:
+            code, problem, klass, seconds = verify.run(argv, folder, log, timeout)
+    return {"exit_code": code, "problem": problem, "klass": klass, "seconds": seconds, "log": str(log), **binding}
+
+
+def _check_replacement(repair):
+    evidence = repair["replacement"]
+    if not Path(evidence["log"]).is_file() or verify.file_digest(evidence["log"]) != evidence["sha256"]:
+        raise CardError("The replacement log no longer matches the audited run. Call kanban_block(kind='needs_input') for the maintainer.")
+
+
+def pending_supersession(state):
+    """The repaired round is historical; a new round has not yet consumed the successful run."""
+    records = state.get("evidence_supersessions", [])
+    if records and state["rounds"][-1]["n"] == records[-1]["round"]:
+        return records[-1]
+    return None
+
+
+def repair_tree_issue(state, tree):
+    repair = pending_supersession(state)
+    if repair and repair["tree"] != tree:
+        return "Restore the evidence supersession's exact tree, then run ai-dev-card verify and review brief."
+    rnd = _open_round(state, required=False)
+    if rnd and rnd.get("supersedes_round") and rnd["outcome"] is None and rnd["tree"] != tree:
+        return "Restore the repaired round's exact tree and run ai-dev-card review settle."
+    return None
+
+
+def _panel_rule(review):
+    return verify.digest(["family-independent-v2", review["panel"]]) if review["panel_required"] else None
+
+
+_SUPERSEDE = ("Run ai-dev-card review supersede-evidence --finding KEY --round N --tree TREE "
+              "--old-sha256 SHA256 --test TestName --owner-ref MESSAGE --reason TEXT from the maintainer shell.")
+
+
+def _legacy_evidence(card, state, workspace, rnd, entry, old_sha256):
+    key, proof = entry["key"], entry.get("confirm") or {}
+    files = proof.get("files") or {}
+    rechecks = [r for r in rnd["rechecks"] if r["key"] == key]
+    if (len(files) != 1 or not reproduction.is_go(proof.get("argv") or []) or proof.get("result") != "confirmed"
+            or len(rechecks) != 1 or rechecks[0].get("fixed")
+            or not any(r["n"] <= rnd["n"] and r["tree"] == proof.get("tree") for r in state["rounds"])):
+        raise CardError("No unambiguous legacy Go overlay and recheck for this finding. " + _SUPERSEDE)
+    destination, fixture = next(iter(files.items()))
+    path = Path(destination)
+    target = Path(fixture)
+    folder = card.dir / "evidence" / "confirm" / key
+    base, candidate = proof.get("base") or {}, proof.get("candidate") or {}
+    attempt_folder = Path(candidate.get("log") or "").parent
+    recheck = rechecks[0]
+    # Restrict to the recorded reproduction's own files and the exact round log, never caller paths.
+    if (path.is_absolute() or ".." in path.parts or not path.name.endswith("_test.go")
+            or not target.is_absolute() or not target.resolve().is_relative_to(folder.resolve())
+            or any(outcome.get("klass") != "fail" or outcome.get("exit_code") != 1 for outcome in (base, candidate, recheck))
+            or target != attempt_folder / "files" / path
+            or Path(base.get("log") or "") != attempt_folder / "base.log"
+            or Path(candidate.get("log") or "") != attempt_folder / "candidate.log"
+            or Path(recheck.get("log") or "") != folder / f"recheck-round-{rnd['n']}.log"):
+        raise CardError("Reproduction artifacts do not match the finding and round. " + _SUPERSEDE)
+    package = "." if path.parent == Path(".") else "./" + path.parent.as_posix()
+    if not reproduction.PACKAGE.fullmatch(package) or not _tracked_regular_blob(workspace, rnd["commit"], destination):
+        raise CardError("No tracked regular Go test at the stale overlay destination. " + _SUPERSEDE)
+    try:
+        fixture_sha = verify.file_digest(target)
+        logs = {}
+        for name, outcome in (("base", base), ("candidate", candidate), ("recheck", recheck)):
+            log = Path(outcome["log"])
+            if log.resolve() != log or not log.is_relative_to(folder):
+                raise CardError("A historical log is outside the finding's evidence. " + _SUPERSEDE)
+            data = log.read_bytes()
+            if not reproduction.legacy_compile_only(data, destination):
+                raise CardError("Historical failure is not unambiguously compile-only. " + _SUPERSEDE)
+            logs[name] = {"path": str(log), "sha256": hashlib.sha256(data).hexdigest()}
+    except OSError as error:
+        raise CardError("Cannot read the historical reproduction artifacts. " + _SUPERSEDE) from error
+    if fixture_sha != (proof.get("files_sha256") or {}).get(destination) or logs["recheck"]["sha256"] != old_sha256:
+        raise CardError("Historical reproduction hash does not match. " + _SUPERSEDE)
+    return package, {"logs": logs, "fixture": {"path": fixture, "destination": destination, "sha256": fixture_sha},
+                     "confirmation_sha256": verify.digest(proof), "confirmation_tree": proof["tree"]}
+
+
+def supersede_evidence(card, worktree, key, round_number, tree, old_sha256, test, owner_ref, reason):
+    """Maintainer operation for a settled, compile-only overlay incident. No worker or board transition."""
+    from .gate import role
+    from .recovery import attempt_limit
+    if (os.environ.get("HERMES_KANBAN_TASK") or role(plugin_dir=os.environ.get("AI_DEV_PLUGIN_DIR"))
+            or not (owner_ref or "").strip() or not (reason or "").strip()
+            or not reproduction.TEST.fullmatch(test or "") or not re.fullmatch(r"[a-f0-9]{64}", old_sha256 or "")):
+        raise CardError(_SUPERSEDE)
+    with card.locked() as state:
+        workspace, settings, current = verify.prepare(state, worktree)
+        rnd = state["rounds"][-1] if state["rounds"] else {}
+        entry = state["ledger"].get(key) or {}
+        if (current != tree or rnd.get("tree") != tree or rnd.get("n") != round_number
+                or rnd.get("outcome") != "changes" or rnd.get("blocking") != [key] or entry.get("status") != "confirmed"
+                or pending_supersession(state) or str(gitio.main_repo(workspace)) != state["repo"]
+                or gitio.text(workspace, "rev-parse", rnd["commit"] + "^{tree}") != tree):
+            raise CardError("Expected the latest settled changes round, its sole confirmed blocker and its exact tree. " + _SUPERSEDE)
+        if state.get("attempt", 1) > attempt_limit(state, settings):
+            raise CardError("The attempt budget is exhausted. Call kanban_block(kind='needs_input') for an owner decision.")
+        package, old = _legacy_evidence(card, state, workspace, rnd, entry, old_sha256)
+        recorded = reproduction.structured(entry["confirm"]["argv"])
+        if not recorded or (recorded[0][-1], recorded[1]) != (package, test):
+            raise CardError("The tracked test package and selector must match the recorded reproduction. " + _SUPERSEDE)
+        argv = reproduction.command(package, test)
+        folder = Path(tempfile.mkdtemp(prefix="run-", dir=card.evidence("supersessions", key)))
+        log = folder / "replacement.log"
+        run = _reproduce(workspace, rnd["commit"], {}, argv, log, settings["review"]["confirm_timeout"],
+                         tracked_test=old["fixture"]["destination"])
+        if (gitio.snapshot(workspace) != tree or _legacy_evidence(card, state, workspace, rnd, entry, old_sha256)[1] != old):
+            raise CardError("Candidate or historical evidence changed during the run. " + _SUPERSEDE)
+        audit = sanitize({"key": key, "round": round_number, "tree": tree, "commit": rnd["commit"], "owner_ref": owner_ref,
+                          "reason": reason, "actor": getpass.getuser(), "at": now(), "old": old, "argv": argv,
+                          "replacement": {**run, "sha256": verify.file_digest(log)},
+                          "receipt_floor": max((v["id"] for v in state["verifications"]), default=0)})
+        fixed = run["klass"] == "pass"
+        (folder / "run.json").write_text(json.dumps(audit, indent=1, ensure_ascii=False))
+        if fixed:
+            state.setdefault("evidence_supersessions", []).append(audit)
+            entry["status"] = "fixed"
+            entry["disposition"] = {"outcome": "fixed", "tree": tree, "evidence": audit["replacement"], "at": now()}
+            entry["history"].append({"at": now(), "round": round_number, "status": "fixed", "by": audit["actor"],
+                                     "reason": audit["reason"], "supersession": str(folder / "run.json")})
+        record(state, "finding.evidence-superseded" if fixed else "finding.evidence-supersession-inconclusive",
+               key=key, round=round_number, tree=tree, audit=str(folder / "run.json"))
+        return {"key": key, "status": entry["status"], "audit": audit,
+                "next": ("Run ai-dev-card verify and ai-dev-card review brief for a fresh independent round."
+                         if fixed else "The finding still blocks. Inspect the replacement log and consult the maintainer.")}
 
 
 def brief(card, worktree):
     """Open (or reopen) the review round for the current tree and return what the reviewer needs."""
     with card.locked() as state:
         worktree, settings, tree = verify.prepare(state, worktree)
+        issue = repair_tree_issue(state, tree)
+        if issue:
+            raise CardError(issue)
         receipt = verify.passing_receipt(state, settings, tree, "pre_review")
         if not receipt:
             raise CardError("Review needs a passing verification of this exact tree. The implementer runs "
                             "`ai-dev-card verify` and hands the card over again.")
         last = state["rounds"][-1] if state["rounds"] else None
-        panel_rule = verify.digest(["family-independent-v2", settings["review"]["panel"]]) if settings["review"]["panel_required"] else None
-        if last and last["tree"] == tree and panel_rule and last.get("panel_rule") != panel_rule:
+        panel_rule = _panel_rule(settings["review"])
+        pending = pending_supersession(state)
+        repair = verify.supersession_for(state, tree)
+        if repair:
+            _check_replacement(repair)
+        refresh = (not pending and last and last["tree"] == tree and (repair or panel_rule)
+                   and last.get("panel_rule") != panel_rule)
+        # Keep settled repair verdicts as history; only the latest round can authorize a transition.
+        if refresh and (not repair or last["outcome"] is None):
             last.update(outcome="superseded", superseded="Independent reviewer routes changed")
             record(state, "review.superseded", round=last["n"], reason=last["superseded"])
-        if last and last["tree"] == tree and last["outcome"] in ("accept", "changes"):
+        if not pending and not refresh and last and last["tree"] == tree and last["outcome"] in ("accept", "changes"):
             stored = json.loads((card.evidence(f"round-{last['n']}") / "brief.json").read_text())
             return {**stored, "settled": last["outcome"],
                     "next": [f"This tree was already reviewed: round {last['n']} settled as {last['outcome']}. "
                              "Run `ai-dev-card review settle` to see the board call to make."]}
         from .recovery import attempt_limit, require_diagnosis
         require_diagnosis(state, settings)
-        rnd = _open_round(state, required=False)
+        rnd = None if refresh else _open_round(state, required=False)
         if rnd and rnd["tree"] != tree:
             if rnd["outcome"] == "owner":
                 rnd["outcome"] = "changes"
@@ -193,6 +382,8 @@ def brief(card, worktree):
             rnd = {"n": max((r["n"] for r in state["rounds"]), default=0) + 1, "tree": tree, "commit": receipt["commit"],
                    "mode": "delta" if previous else "full", "started": now(), "reports": {}, "panel": {},
                    "previous_commit": previous["commit"] if previous else None, "rechecks": [], "outcome": None}
+            if repair:
+                rnd.update(mode="full", previous_commit=None, supersedes_round=repair["round"])
             state["rounds"].append(rnd)
             if previous or state.get("inherited_from"):
                 _recheck(card, state, rnd, worktree, settings)
@@ -211,7 +402,8 @@ def brief(card, worktree):
             delta = gitio.changed_files(worktree, rnd["previous_commit"], rnd["commit"])
         ledger = state["ledger"].values()
         result = {
-            "round": rnd["n"], "attempt": state.get("attempt", 1), "max_attempts": attempt_limit(state, settings),
+            "round": rnd["n"], **({"supersedes_round": rnd["supersedes_round"]} if "supersedes_round" in rnd else {}),
+            "attempt": state.get("attempt", 1), "max_attempts": attempt_limit(state, settings),
             "max_rounds": settings["review"]["max_rounds"] + state["extra_rounds"],
             "mode": rnd["mode"], "tree": tree, "base": state["base"], "files": files,
             "changed_files": gitio.changed_files(worktree, state["base"], rnd["commit"]), "delta_files": delta,
@@ -232,11 +424,35 @@ def brief(card, worktree):
         return result
 
 
+def _replacement_for(state, entry):
+    proof_sha = verify.digest(entry.get("confirm") or {})
+    return next((r for r in reversed(state.get("evidence_supersessions", []))
+                 if r["key"] == entry["key"] and r["old"]["confirmation_sha256"] == proof_sha), None)
+
+
 def _recheck(card, state, rnd, worktree, settings):
     """Rerun every stored reproduction on the new candidate. One that passes now closes its finding."""
     from . import findings
     for key, entry in sorted(state["ledger"].items()):
         proof = entry.get("confirm") or {}
+        replacement = _replacement_for(state, entry)
+        if replacement and entry["status"] in ("fixed", "confirmed", "candidate"):
+            if replacement["tree"] == rnd["tree"] and entry.get("disposition", {}).get("evidence") == replacement["replacement"]:
+                continue
+            log = card.evidence("supersessions", key) / f"recheck-round-{rnd['n']}.log"
+            destination = replacement["old"]["fixture"]["destination"]
+            outcome = _reproduce(worktree, rnd["commit"], {}, replacement["argv"], log,
+                                 settings["review"]["confirm_timeout"], tracked_test=destination)
+            # No behavioral result cannot clear a previously confirmed blocker.
+            status = "fixed" if outcome["klass"] == "pass" else "confirmed"
+            entry["status"] = status
+            if status == "fixed":
+                entry["disposition"] = {"outcome": "fixed", "tree": rnd["tree"], "evidence": outcome, "at": now()}
+            else:
+                entry.pop("disposition", None)
+            entry["history"].append({"at": now(), "round": rnd["n"], "status": status, "by": "recheck", "evidence": outcome})
+            rnd["rechecks"].append({"key": key, "fixed": status == "fixed", "tracked_replacement": destination, **outcome})
+            continue
         if (entry["status"] != "confirmed" and not findings.inline_pending(entry)) or not proof.get("argv"):
             continue
         log = card.evidence("confirm", key) / f"recheck-round-{rnd['n']}.log"
@@ -302,6 +518,9 @@ def confirm(card, worktree, key, files=(), argv=(), timeout=None, cannot=None):
         if entry.get("needs_assessment"):
             raise CardError("Reconcile the finding with ai-dev-card finding assess KEY --severity LEVEL --impact TEXT --evidence FILE.")
         if cannot:
+            if (entry.get("confirm") or {}).get("result") == "candidate":
+                raise CardError("The last run produced no behavioral result. Fix the reproduction and run ai-dev-card confirm again, "
+                                "or obtain an owner-approved ai-dev-card finding waive.")
             result, proof = "unconfirmed", {"tree": rnd["tree"], "result": "unconfirmed", "reason": cannot, "at": now()}
         else:
             if not argv:
@@ -324,7 +543,7 @@ def confirm(card, worktree, key, files=(), argv=(), timeout=None, cannot=None):
             candidate = _reproduce(worktree, rnd["commit"], stored, list(argv), folder / "candidate.log", limit)
             base = _reproduce(worktree, state["base"], stored, list(argv), folder / "base.log", limit)
             if candidate["klass"] == "environment":
-                result = "unconfirmed"
+                result = "candidate"
             elif candidate["klass"] == "pass":
                 result = "disproved"
             elif entry["violates"] != "regression":
@@ -334,7 +553,7 @@ def confirm(card, worktree, key, files=(), argv=(), timeout=None, cannot=None):
             elif base["klass"] == "fail":
                 result = "discovery"
             else:
-                result = "unconfirmed"
+                result = "candidate"
             proof = {"tree": rnd["tree"], "result": result, "argv": list(argv), "files": stored,
                      "candidate": candidate, "base": base, "at": now(),
                      "files_sha256": {name: verify.file_digest(path) for name, path in stored.items()}}
@@ -343,7 +562,7 @@ def confirm(card, worktree, key, files=(), argv=(), timeout=None, cannot=None):
         entry["baseline"] = result == "discovery"
         if result == "disproved":
             entry["disposition"] = {"outcome": "disproved", "tree": rnd["tree"], "evidence": proof, "at": now()}
-        elif result in ("confirmed", "discovery", "unconfirmed"):
+        elif result in ("confirmed", "discovery", "unconfirmed", "candidate"):
             entry.pop("disposition", None)
         entry["history"].append({"at": now(), "round": rnd["n"], "status": result, "by": "confirm", "reason": proof.get("reason")})
         record(state, "finding." + result, key=key, round=rnd["n"])
@@ -405,10 +624,14 @@ def owed(state, review, rnd):
 
 
 def independent_evidence(state, settings, rnd):
+    for repair in state.get("evidence_supersessions", []):
+        if rnd.get("supersedes_round") == repair["round"]:
+            _check_replacement(repair)
+    if (settings["panel_required"] or rnd.get("supersedes_round")) and rnd.get("panel_rule") != _panel_rule(settings):
+        step = " and ai-dev-card review panel" if settings["panel_required"] else ""
+        return f"Independent reviewer routes changed. Run ai-dev-card review brief{step}."
     if not settings["panel_required"]:
         return None
-    if rnd.get("panel_rule") != verify.digest(["family-independent-v2", settings["panel"]]):
-        return "Independent reviewer routes changed. Run ai-dev-card review brief and ai-dev-card review panel."
     if owed(state, settings, rnd):
         return ("An authenticated report is required from every reviewer whose provider is available. "
                 "Run ai-dev-card review panel.")
@@ -427,6 +650,10 @@ def settle(card, worktree):
     with card.locked() as state:
         worktree, settings, tree = verify.prepare(state, worktree)
         last = state["rounds"][-1] if state["rounds"] else None
+        if pending_supersession(state):
+            raise CardError("Evidence was superseded. Run ai-dev-card verify and ai-dev-card review brief for a fresh round.")
+        if last and last.get("supersedes_round") and not verify.passing_receipt(state, settings, tree, "pre_review"):
+            raise CardError("Run ai-dev-card verify for a current passing receipt before settling the repaired round.")
         if last and last["tree"] == tree and last["outcome"] in ("accept", "changes"):
             issue = independent_evidence(state, settings["review"], last)
             if issue:
@@ -461,7 +688,7 @@ def settle(card, worktree):
         blocking = sorted(k for k, e in ledger.items() if e["status"] in BLOCKING or findings.inline_pending(e))
         from .recovery import attempt_limit, correction_facts, correction_key
         limit = attempt_limit(state, settings)
-        facts = correction_facts(state, "review")
+        facts = correction_facts(state, "review", settings)
         diagnosis = state.get("diagnoses", {}).get(correction_key("review", facts), {}) if facts else {}
         authorized = diagnosis.get("authorized")
         can_correct = state.get("attempt", 1) < limit or (authorized and authorized <= limit)
@@ -534,7 +761,15 @@ def _fix_brief(state, rnd, blocking, outcome, limit):
         lines.append(f"- **{entry['title']}** (`{key}`, {entry['violates']}, {entry.get('location') or 'no location'})")
         lines.append(f"  - Trigger: {entry.get('trigger')}. Expected: {entry.get('expected')}. Actual: {entry.get('actual')}.")
         proof = entry.get("confirm") or {}
-        if proof.get("argv"):
+        replacement = _replacement_for(state, entry)
+        if replacement:
+            destination = replacement["old"]["fixture"]["destination"]
+            lines.append(f"  - Rerun tracked test `{destination}` without an overlay: `{' '.join(replacement['argv'])}`.")
+            recheck = next((r for r in rnd["rechecks"] if r["key"] == key and r.get("tracked_replacement") == destination), None)
+            if recheck:
+                lines.append(f"  - Current recheck ({recheck['klass']}): {recheck['log']}.")
+            lines.append("  - Keep the tracked test in the patch. Do not restore the superseded fixture.")
+        elif proof.get("argv"):
             lines.append(f"  - Reproduction: `{' '.join(proof['argv'])}`. It fails on this tree and must pass after the fix.")
             for destination, stored in proof["files"].items():
                 lines.append(f"  - Add this test to the patch at `{destination}` (copy: {stored}).")

@@ -121,11 +121,12 @@ def manual_evidence(card, state, tree):
     return proofs
 
 
-def run(argv, cwd, log_path, timeout):
+def run(argv, cwd, log_path, timeout, env_overrides=None):
     """Returns (exit_code, problem, klass, seconds). klass is pass, fail, or environment when the command could not run."""
     started = time.monotonic()
     with open(log_path, "wb") as log:
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(env_overrides or {})
         try:
             process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log,
                                        stderr=subprocess.STDOUT, start_new_session=True)
@@ -177,20 +178,63 @@ def checks_digest(checks):
     return digest([[c["name"], c["argv"], c.get("stand")] for c in checks])
 
 
+def supersession_for(state, tree):
+    return next((e for e in reversed(state.get("evidence_supersessions", [])) if e["tree"] == tree), None)
+
+
+def accepted_round_after_repair(state, repair):
+    rnd = state["rounds"][-1] if state["rounds"] else {}
+    if rnd.get("tree") == repair["tree"] and rnd.get("outcome") == "accept" and rnd["n"] > repair["round"]:
+        return rnd["n"]
+    return None
+
+
+def _matches_repair(state, repair, item, wanted):
+    if item["id"] <= repair["receipt_floor"] or item.get("checks_digest") != wanted:
+        return False
+    if item["stage"] == "post_review":
+        accepted = accepted_round_after_repair(state, repair)
+        return accepted is not None and item.get("review_round") == accepted
+    return True
+
+
+def applicable_receipt(state, settings, item):
+    """On a repaired tree only fresh, currently configured checks drive recovery and gates."""
+    repair = supersession_for(state, item["tree"])
+    if not repair:
+        return True
+    checks = checks_for(settings, state["contract"], item["stage"])
+    return bool(checks and _matches_repair(state, repair, item, checks_digest(checks)))
+
+
 def passing_receipt(state, settings, tree, stage):
     """The passing receipt for this tree under the checks that apply now. A check added later voids older receipts."""
-    wanted = checks_digest(checks_for(settings, state["contract"], stage))
+    checks = checks_for(settings, state["contract"], stage)
+    wanted = checks_digest(checks)
+    repair = supersession_for(state, tree)
     for item in reversed(state["verifications"]):
-        if (item["tree"] == tree and item["stage"] == stage and item["passed"]
-                and item.get("checks_digest") == wanted):
+        if not (item["tree"] == tree and item["stage"] == stage and item["passed"]):
+            continue
+        if repair:
+            if not checks or not _matches_repair(state, repair, item, wanted):
+                continue
+        elif item.get("checks_digest") != wanted:
+            continue
+        return item
+    return None
+
+
+def last_for(state, tree, stage, settings):
+    for item in reversed(state["verifications"]):
+        if item["tree"] == tree and item["stage"] == stage and applicable_receipt(state, settings, item):
             return item
     return None
 
 
-def last_for(state, tree, stage):
-    for item in reversed(state["verifications"]):
-        if item["tree"] == tree and item["stage"] == stage:
-            return item
+def post_review_defect(state, settings, tree):
+    last = last_for(state, tree, "post_review", settings)
+    if last and last["result"] == "defect" and not passing_receipt(state, settings, tree, "post_review"):
+        return last
     return None
 
 
@@ -231,6 +275,10 @@ def verify(card, worktree, stage="pre_review", rerun=False):
             record(state, "contract.frozen", digest=digest(contract))
         from .recovery import require_diagnosis
         require_diagnosis(state, settings)
+        repair = supersession_for(state, tree) if stage == "post_review" else None
+        if repair:
+            if accepted_round_after_repair(state, repair) is None:
+                raise CardError("Superseded evidence needs a fresh accepted round. Run ai-dev-card review brief and settle.")
         previous = passing_receipt(state, settings, tree, stage)
         if previous and not rerun:
             return previous, 0
@@ -289,6 +337,10 @@ def verify(card, worktree, stage="pre_review", rerun=False):
                    "problem": ("The working tree changed while checks ran: " + ", ".join(touched[:8]) + ". If a check "
                                "writes these files, add them to .gitignore or make the check clean up; otherwise "
                                "stop editing and verify again.") if changed else None}
+        if stage == "post_review" and state["rounds"]:
+            rnd = state["rounds"][-1]
+            if rnd["outcome"] == "accept" and rnd["tree"] == tree:
+                receipt["review_round"] = rnd["n"]
         repair_checks = [r for r in results if r["klass"] in ("environment", "pre_existing")]
         if repair_checks and not changed:
             receipt["repair_requests"] = []
