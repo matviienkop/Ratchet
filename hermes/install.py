@@ -22,7 +22,7 @@ SOURCE = Path(__file__).resolve().parent.parent
 MARKER, OWNER = ".ai-dev-managed", "ai-dev\n"
 ROLES = ("planner", "coder", "reviewer")
 TOOLS = ("ai-dev-card", "ai-dev", "ai-dev-discover", "ai-dev-analyze", "ai-dev-style-default", "ai-dev-incident", "ai-dev-tracker")
-SKILLS = {"planner": ("ai-dev-planner", "project-onboarding", "ai-dev-repair", "unslop"),
+SKILLS = {"planner": ("ai-dev-planner", "project-onboarding", "ai-dev-repair", "ai-dev-research", "unslop"),
           "coder": ("ai-dev-card", "unslop"), "reviewer": ("ai-dev-card", "unslop")}
 # Skills that run no ai-dev command get no launcher note.
 PLAIN = {"unslop"}

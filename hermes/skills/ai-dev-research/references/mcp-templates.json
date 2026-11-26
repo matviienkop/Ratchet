@@ -1,0 +1,101 @@
+{
+  "mcp_servers": {
+    "project_linear": {
+      "enabled": false,
+      "timeout": 60,
+      "connect_timeout": 30,
+      "tools": {
+        "include": [],
+        "resources": false,
+        "prompts": false
+      },
+      "url": "https://mcp.linear.app/mcp/readonly",
+      "auth": "oauth"
+    },
+    "project_confluence": {
+      "enabled": false,
+      "timeout": 60,
+      "connect_timeout": 30,
+      "tools": {
+        "include": [],
+        "resources": false,
+        "prompts": false
+      },
+      "url": "https://mcp.atlassian.com/v2/mcp",
+      "auth": "oauth"
+    },
+    "project_grafana_cloud": {
+      "enabled": false,
+      "timeout": 60,
+      "connect_timeout": 30,
+      "tools": {
+        "include": [],
+        "resources": false,
+        "prompts": false
+      },
+      "url": "https://mcp.grafana.com/mcp",
+      "auth": "oauth"
+    },
+    "project_grafana_local": {
+      "enabled": false,
+      "timeout": 60,
+      "connect_timeout": 30,
+      "tools": {
+        "include": [],
+        "resources": false,
+        "prompts": false
+      },
+      "command": "mcp-grafana",
+      "args": [
+        "--disable-write"
+      ],
+      "env": {
+        "GRAFANA_URL": "${PROJECT_GRAFANA_URL}",
+        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "${PROJECT_GRAFANA_TOKEN}"
+      }
+    },
+    "project_snowflake": {
+      "enabled": false,
+      "timeout": 60,
+      "connect_timeout": 30,
+      "tools": {
+        "include": [],
+        "resources": false,
+        "prompts": false
+      },
+      "url": "${PROJECT_SNOWFLAKE_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${PROJECT_SNOWFLAKE_PAT}",
+        "X-Snowflake-Authorization-Token-Type": "PROGRAMMATIC_ACCESS_TOKEN"
+      }
+    },
+    "project_database": {
+      "enabled": false,
+      "timeout": 60,
+      "connect_timeout": 30,
+      "tools": {
+        "include": [],
+        "resources": false,
+        "prompts": false
+      },
+      "url": "${PROJECT_DATABASE_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${PROJECT_DATABASE_MCP_TOKEN}"
+      }
+    },
+    "project_logs": {
+      "enabled": false,
+      "timeout": 60,
+      "connect_timeout": 30,
+      "tools": {
+        "include": [],
+        "resources": false,
+        "prompts": false
+      },
+      "url": "${PROJECT_LOGS_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${PROJECT_LOGS_MCP_TOKEN}"
+      }
+    }
+  }
+}

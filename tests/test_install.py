@@ -74,6 +74,13 @@ class Install(unittest.TestCase):
         self.assertTrue((planner / "ai-dev-planner/references/task-analysis.md").is_file())
         template = json.loads((planner / "ai-dev-planner/references/analysis-template.json").read_text())
         self.assertEqual(template["readiness"], "needs_input")
+        research = planner / "ai-dev-research/references"
+        templates = json.loads((research / "mcp-templates.json").read_text())["mcp_servers"]
+        self.assertEqual(len(templates), 7)
+        self.assertTrue(all(not c["enabled"] and c["tools"]["include"] == [] for c in templates.values()))
+        self.assertIn("--disable-write", templates["project_grafana_local"]["args"])
+        self.assertTrue(templates["project_linear"]["url"].endswith("/readonly"))
+        self.assertFalse((coder / "skills/software-development/ai-dev-research").exists())
         self.assertTrue((planner / "project-onboarding/references/research.md").is_file())
         self.assertIn(str((self.root / "bin").resolve()), (planner / "ai-dev-planner/SKILL.md").read_text())
         done = subprocess.run([str(self.root / "bin" / "ai-dev-card"), "doctor"], capture_output=True, text=True,

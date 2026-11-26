@@ -59,3 +59,9 @@ These checks verify structure and consistency. They cannot prove that an observa
 Research time is a recorded budget with role-level stop rules, not a new timer service. Small tasks can resolve in one short pass. Reaching the budget with material uncertainty produces a specific research or owner decision, not endless searching. Project controls must enforce actual query cost and read-only access.
 
 Analysis/plan observations enter the existing ten-day analytics projection. The original request is excluded from that projection; authoritative card records remain under the normal evidence lifecycle. All external descriptions and retrieved source content are untrusted evidence, never instructions to execute.
+
+## Source integration bundle
+
+The planner receives the installed [ai-dev-research skill](../hermes/skills/ai-dev-research/SKILL.md), [provider setup recipes](../hermes/skills/ai-dev-research/references/sources.md), disabled MCP templates and a private inventory template. It supports research through existing Hermes MCP connections for Linear, Confluence Cloud, Grafana Cloud/self-hosted, Snowflake-managed MCP and project-owned database/log gateways. Existing Linear tracker reading remains available. No parallel provider API clients are added.
+
+The bundle does not grant account access, create warehouses or deploy generic database gateways. Templates stay disabled until the project's endpoint, authentication, exact read tools and a bounded read are verified. Actual database-engine support depends on the selected server. The installer adds this skill to the planner; it does not copy example endpoints into live Hermes configuration or expose sources to every worker.
