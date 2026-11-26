@@ -151,7 +151,7 @@ def finding(args):
     if args.action == "return":
         return findings.late_return(card, _workspace(args), args.reason), 0
     ledger = card.load()["ledger"]
-    return {"findings": [{**severity.describe(e), **{k: e.get(k) for k in ("violates", "location", "first_round", "sources", "disposition", "confirm")}}
+    return {"findings": [{**severity.describe(e), **{k: e.get(k) for k in ("violates", "location", "first_round", "sources", "disposition", "confirm", "inherited_from")}}
                          for e in ledger.values()]}, 0
 
 

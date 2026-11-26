@@ -50,14 +50,15 @@ def inherit(card, source_card):
                                 "files_sha256": {name: hashlib.sha256(stored_files[Path(path)]).hexdigest()
                                                  for name, path in copied.items()},
                                 "inherited_from": {**provenance, "key": key, "tree": proof.get("tree")}}
-            entry["status"] = "confirmed"
+            entry["status"] = ("confirmed" if old_status in ("confirmed", "fixed") else
+                               "candidate" if review._valid_violation(entry.get("violates"), contract) else "note")
         else:
             entry.pop("confirm", None)
             if entry.get("kind") == "gap":
                 entry["status"] = "gap"
             elif old_status not in ("note", "discovery"):
                 entry["status"] = "candidate" if review._valid_violation(entry.get("violates"), contract) else "note"
-        entry.pop("disposition", None)
+        previous_ticket = (entry.pop("disposition", None) or {}).get("ticket")
         entry.pop("assessment", None)
         entry.pop("attempts", None)
         entry.pop("sources", None)
@@ -68,7 +69,8 @@ def inherit(card, source_card):
         entry["raised_round"] = 1
         entry["reporters"] = []
         entry["needs_assessment"] = False
-        entry["inherited_from"] = {**provenance, "key": key, "status": old_status}
+        entry["inherited_from"] = {**provenance, "key": key, "status": old_status,
+                                   **({"ticket": previous_ticket} if previous_ticket else {})}
         entry["history"] = [{"round": 0, "status": entry["status"], "by": "inherit", "source": provenance,
                              "reason": "The new implementation must prove this obligation again."}]
     for scenario in contract.get("scenarios", []):

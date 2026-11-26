@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 from test_card import CardCase
-from ai_dev import continuity, review, verify
+from ai_dev import continuity, findings, review, verify
 from ai_dev.store import Card, CardError
 
 
@@ -75,6 +75,40 @@ class Continuity(CardCase):
         evidence = Path(state["contract"]["scenarios"][0]["manual"])
         self.assertTrue(evidence.is_relative_to(self.target.dir))
         self.assertFalse(evidence.exists())
+
+    def test_baseline_discovery_and_followup_need_fresh_confirmation(self):
+        self.report([self.blocker(violates="regression", mechanism="baseline sum mismatch")])
+        key = next(k for k, entry in self.card.load()["ledger"].items()
+                   if entry["mechanism"] == "baseline sum mismatch")
+        proof = self.confirm(key, body="""
+            import unittest, calc
+            class R(unittest.TestCase):
+                def test_sum(self):
+                    self.assertEqual(calc.add(2, 2), 5)
+            """)
+        self.assertEqual(proof["status"], "discovery")
+        ticket = "https://example.org/issues/baseline-sum"
+        for old_status in ("discovery", "deferred"):
+            with self.subTest(old_status=old_status):
+                if old_status == "deferred":
+                    findings.resolve(self.card, self.repo, key, "deferred", "Existing baseline behavior", ticket=ticket)
+                target = Card("test", "rewrite-" + old_status)
+                continuity.inherit(target, self.card)
+                entry = target.load()["ledger"][key]
+                self.assertEqual(entry["status"], "candidate")
+                self.assertNotIn("disposition", entry)
+                if old_status == "deferred":
+                    self.assertEqual(entry["inherited_from"]["ticket"], ticket)
+                verify.verify(target, self.repo)
+                brief = review.brief(target, self.repo)
+                self.assertNotIn(key, [check["key"] for check in brief["rechecks"]])
+                copied = entry["confirm"]
+                fresh = review.confirm(target, self.repo, key,
+                                       files=[(path, name) for name, path in copied["files"].items()],
+                                       argv=copied["argv"])
+                self.assertEqual(fresh["status"], "discovery")
+                result = findings.resolve(target, self.repo, key, "deferred", "Still existing on the new base", ticket=ticket)
+                self.assertEqual(result["status"], "deferred")
 
     def test_existing_target_and_same_card_are_rejected(self):
         with self.assertRaisesRegex(CardError, "different source"):
