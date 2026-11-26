@@ -102,7 +102,13 @@ It reads the open PR, matches its source tree to the reviewed candidate, checks 
 card with `metadata.published_pr` set to the same URL. The gate rereads the current head and newest CI run;
 a new commit, a rerun, a closed PR or a policy change requires fresh evidence. A pending or failed rerun
 cannot reuse an earlier passing receipt. No package catalog, installation or merge is required for this
-boundary. The owner decides whether to merge later.
+boundary.
+
+Whether the PR is merged before or after completion is the project's decision. Where the worker is
+authorized to merge, it merges the head the receipt names (`gh pr merge --match-head-commit SHA`) and then
+completes the card: the gate accepts a PR merged from that head while its newest exact-head run still passes.
+A PR merged from any other head has no evidence and goes to the owner. A PR closed without a merge cannot
+complete the card.
 
 The setting is optional for projects whose native Hermes PR acceptance already supplies the required
 checks. With a package release contract, its `release.ci_workflow` continues to govern pre-merge CI.
@@ -148,4 +154,4 @@ Manual proof contains `tree`, `scenario`, `result: "pass"` and nonempty `observe
 
 On an active legacy card, add evidence links with `contract set`. Adding fields to an otherwise unchanged scenario does not weaken the frozen contract. Do not invent passing evidence for historical cards. Completed cards are not migrated or reopened by installation. Projects can set `require_scenario_evidence: false` during an explicit migration; malformed references remain errors.
 
-When the owner chooses a fresh implementation card, run `ai-dev-card contract inherit --from-card ID --from-board BOARD` on the fresh destination. It copies the contract and obligations with provenance, copies stored reproductions, and reruns them on the first new review candidate. It does not carry over acceptance, owner waivers, CI or manual proof. The source card stays unchanged. Inheritance refuses to overwrite an existing destination contract.
+When the owner chooses a fresh implementation card, run `ai-dev-card contract inherit --from-card ID --from-board BOARD` on the fresh destination. It copies the contract and obligations with provenance, copies stored reproductions, and reruns them on the first new review candidate. It does not carry over acceptance, owner waivers, CI or manual proof. The source card stays unchanged. Inheritance refuses to overwrite an existing destination contract. The inherited contract is frozen from the start: `contract set` can add criteria, scenarios, checks and evidence links, and removing or changing an inherited one needs `--owner-ref`.

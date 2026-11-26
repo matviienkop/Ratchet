@@ -36,6 +36,16 @@ class Continuity(CardCase):
         self.assertEqual(result["source"]["card"], self.card.id)
         self.assertEqual(self.card.file.read_bytes(), before)
 
+    def test_inherited_contract_only_grows_without_the_owner(self):
+        continuity.inherit(self.target, self.card)
+        contract = self.target.load()["contract"]
+        self.assertTrue(self.target.load()["frozen"])
+        with self.target.locked() as state:
+            with self.assertRaisesRegex(CardError, "frozen"):
+                verify.set_contract(state, {**contract, "criteria": ["Something else entirely"]})
+            verify.set_contract(state, {**contract, "criteria": [*contract["criteria"], "One more outcome"]})
+        self.assertEqual(self.target.load()["contract"]["criteria"], [*contract["criteria"], "One more outcome"])
+
     def test_first_brief_rechecks_inherited_reproduction(self):
         continuity.inherit(self.target, self.card)
         verify.verify(self.target, self.repo)
