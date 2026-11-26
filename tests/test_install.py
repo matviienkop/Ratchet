@@ -56,15 +56,20 @@ class FallbackGuard(unittest.TestCase):
         self.assertEqual(patched, self.clean.replace(fallback.ANCHOR, fallback.GUARD + fallback.ANCHOR))
         self.assertIn('"content_policy_blocked"', fallback.GUARD)
         self.assertIn('"rate_limit"', fallback.GUARD)
+        allowed = eval(fallback.GUARD.split("not in ", 1)[1].split(":\n", 1)[0])
+        self.assertIn(None, allowed)
+        self.assertNotIn("format_error", allowed)
         fallback.install(self.root)
         self.assertEqual(self.file.read_text(), patched)
 
     def test_earlier_guard_is_replaced_and_unknown_source_is_refused(self):
-        self.file.write_text(self.clean.replace(fallback.ANCHOR, fallback.AVAILABILITY_ONLY + fallback.ANCHOR))
-        fallback.install(self.root)
-        text = self.file.read_text()
-        self.assertEqual(text.count("ai-dev:"), 1)
-        self.assertIn(fallback.GUARD + fallback.ANCHOR, text)
+        for earlier in fallback.PREVIOUS:
+            self.file.write_text(self.clean.replace(fallback.ANCHOR, earlier + fallback.ANCHOR))
+            fallback.install(self.root)
+            text = self.file.read_text()
+            self.assertEqual(text.count("ai-dev:"), 1)
+            self.assertIn(fallback.GUARD + fallback.ANCHOR, text)
+        self.assertEqual(len(fallback.PREVIOUS), 2)
         self.file.write_text(self.clean + "# another Hermes revision\n")
         with self.assertRaisesRegex(ValueError, "Unknown Hermes fallback"):
             fallback.install(self.root)

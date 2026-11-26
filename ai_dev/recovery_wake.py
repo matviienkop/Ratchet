@@ -23,8 +23,9 @@ def wait_decision(incident, failures):
     if wait["due"] <= time.time():
         return {"action": "resume", "next": "Retry only the missing member with ai-dev-card review panel."}
     return {"action": "schedule", "due": wait["due"], "reason": wait["marker"],
-            "next": "Persist a handoff, then call kanban_schedule with exactly the returned reason. "
-                    "The recovery timer wakes this card when due; keep completed reports."}
+            "next": "Persist a handoff, then park the card from the terminal with the returned command as "
+                    "your last action. The reason must stay exactly as returned: the recovery timer wakes this "
+                    "card by it when due. Keep completed reports."}
 
 
 def native_show(board, task):

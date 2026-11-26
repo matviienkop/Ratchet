@@ -832,6 +832,20 @@ class Panel(CardCase):
         state["log"].append({"event": "model.attempt", "lane": "coder", "model": "gpt-6-sol"})
         self.assertIsNone(review_routes.reserve(state, config, rnd, slot, set()))
 
+    def test_terminal_cannot_move_the_card_around_the_gate(self):
+        env = {"HERMES_KANBAN_TASK": "t_1"}
+        for command, verb in (("hermes kanban --board demo complete t_1", "complete"),
+                              ("cd /w && hermes kanban request-review t_1 --summary done", "request_review"),
+                              ("hermes -p reviewer kanban --board=demo request-changes t_1", "request_changes")):
+            for lane in ("coder", "reviewer"):
+                self.assertIn("kanban_" + verb, gate.decide("terminal", {"command": command}, env=env, lane=lane))
+        for command in ("hermes kanban --board demo schedule t_1 ai-dev-recovery-abc-wait-1",
+                        "hermes kanban show t_1 --json", "hermes kanban comment t_1 complete soon",
+                        "echo complete; hermes kanban list", "make complete"):
+            self.assertIsNone(gate.decide("terminal", {"command": command}, env=env, lane="coder"))
+        self.assertIsNone(gate.decide("terminal", {"command": "hermes kanban complete t_1"}, env=env, lane="planner"))
+        self.assertIsNone(gate.decide("terminal", {"command": "hermes kanban complete t_1"}, env={}, lane="coder"))
+
     def test_safety_filter_refusal_moves_the_review_to_another_provider(self):
         from ai_dev import policy, review_routes
         member = {"output": "hermes-usage", "model": "gpt-6-astra"}

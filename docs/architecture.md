@@ -15,7 +15,7 @@ Hermes references are to `NousResearch/hermes-agent` at v0.23.4 (`0bf290fd4a`). 
 | Required CI on a pull request | Hermes | Completion contract reads required checks on the exact head |
 | Checks bound to the exact tree | **ai-dev** | `ai-dev-card verify`, receipts in the card store |
 | Review that converges | **ai-dev** | Findings ledger, confirmation, round cap, code-derived outcome |
-| Board moves only with evidence | **ai-dev** | `ai-dev-gate` plugin on three board tools |
+| Board moves only with evidence | **ai-dev** | `ai-dev-gate` plugin on three board tools, and on terminal calls that run the same three transitions through `hermes kanban` |
 | Verification stands | **ai-dev** | Root-registered drivers under `/etc/ai-dev/stands` |
 
 Kanban's own review loop has no round limit (`request_changes`, `hermes_cli/kanban_db.py:3408`), and its bundled `sdlc-review` skill changes its lens every round. That is why review is the part ai-dev replaces rather than configures.

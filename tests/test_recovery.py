@@ -53,6 +53,7 @@ class Recovery(CardCase):
         with patch("time.time", return_value=100):
             wait = recovery.recover(self.card,self.repo,"provider")[0]
             self.assertEqual(wait["action"], "schedule")
+            self.assertEqual(wait["command"], f"hermes kanban --board {self.card.board} schedule {self.card.id} {wait['reason']}")
             self.assertEqual(wait, recovery.recover(self.card,self.repo,"provider")[0])
             with self.assertRaisesRegex(CardError, "recover provider"):
                 recovery.claim_provider_retry(self.card,self.card.load()["rounds"][-1],[{"name":"opus"}])

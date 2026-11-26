@@ -24,7 +24,12 @@ def _gate():
 
 
 def check(tool_name=None, args=None, **_):
-    if tool_name not in BOARD_TOOLS or not os.environ.get("HERMES_KANBAN_TASK"):
+    if not os.environ.get("HERMES_KANBAN_TASK"):
+        return None
+    if tool_name == "terminal":
+        if "kanban" not in str((args or {}).get("command") or ""):
+            return None
+    elif tool_name not in BOARD_TOOLS:
         return None
     try:
         gate = _gate()
