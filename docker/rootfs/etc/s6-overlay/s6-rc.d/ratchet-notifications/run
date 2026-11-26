@@ -1,0 +1,7 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Deliver stage handoffs and review summaries to the conversation a card is bound to.
+export HOME=/opt/data
+cd /opt/data
+[ "$(id -u)" = 0 ] || exec ai-dev-card notifications --watch
+exec s6-setuidgid hermes ai-dev-card notifications --watch

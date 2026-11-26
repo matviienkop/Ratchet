@@ -1,0 +1,45 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Install Ratchet from the image into the data volume on every boot.
+#
+# Programs, the gate plugin and the skills live under $HERMES_HOME, which is the
+# persistent volume. Copying them from /opt/ratchet at each start keeps the image
+# the single source of the running version: a new image updates them, an old
+# volume cannot hold a stale copy. Runs after 02-reconcile-profiles.
+set -eu
+
+case "${RATCHET_INSTALL:-1}" in
+    0|false|FALSE|no|NO)
+        echo "[ratchet] RATCHET_INSTALL is off, leaving the volume as it is"
+        exit 0
+        ;;
+esac
+
+export HOME=/opt/data
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+PROFILES="${RATCHET_PROFILES:-default:planner coder:coder reviewer:reviewer}"
+WORKSPACE="${AI_DEV_WORKSPACE:-$HERMES_HOME/ai-dev/workspace}"
+
+# Drop to the hermes user unless the container already runs as it.
+as_hermes() { if [ "$(id -u)" = 0 ]; then s6-setuidgid hermes "$@"; else "$@"; fi; }
+
+cd "$HERMES_HOME"
+args=""
+for item in $PROFILES; do
+    name="${item%%:*}"
+    if [ "$name" != default ] && [ ! -d "$HERMES_HOME/profiles/$name" ]; then
+        echo "[ratchet] creating Hermes profile $name"
+        as_hermes hermes profile create "$name" --clone --no-alias
+    fi
+    args="$args --profile $item"
+done
+
+as_hermes mkdir -p "$WORKSPACE"
+# shellcheck disable=SC2086
+as_hermes python3 /opt/ratchet/hermes/install.py \
+    --hermes-root "$HERMES_HOME" --workspace "$WORKSPACE" --enable $args
+
+# The dispatcher would split triaged cards into new ones with an auxiliary model.
+as_hermes hermes config set kanban.auto_decompose false >/dev/null
+
+echo "[ratchet] revision $(cat /opt/ratchet/REVISION) installed for:$args"

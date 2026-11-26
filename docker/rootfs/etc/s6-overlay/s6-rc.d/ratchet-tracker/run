@@ -1,0 +1,14 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Mirror card stages to the project trackers of the registered projects.
+export HOME=/opt/data
+cd /opt/data
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+WORKSPACE="${AI_DEV_WORKSPACE:-$HERMES_HOME/ai-dev/workspace}"
+# Nothing to mirror until a project is registered. Look again in a minute.
+if ! ls "$WORKSPACE"/*/project.yaml >/dev/null 2>&1; then
+    sleep 60
+    exit 0
+fi
+[ "$(id -u)" = 0 ] || exec ai-dev-tracker "$WORKSPACE" watch --kanban-home "$HERMES_HOME"
+exec s6-setuidgid hermes ai-dev-tracker "$WORKSPACE" watch --kanban-home "$HERMES_HOME"
