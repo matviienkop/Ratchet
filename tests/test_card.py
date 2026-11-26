@@ -1282,6 +1282,35 @@ class DiagnosedAttempts(CardCase):
         with self.assertRaisesRegex(CardError, "exhausted"):
             self.verified()
 
+    def test_owner_extension_allows_exactly_one_more_review_attempt(self):
+        for extension in ("rounds", "failures"):
+            with self.subTest(extension=extension):
+                self.card = Card("test", extension)
+                os.environ["HERMES_KANBAN_TASK"] = extension
+                self.contract()
+                self.implement()
+                self.verified()
+                review.brief(self.card, self.repo)
+                key = self.report([self.blocker()])["to_confirm"][0]
+                self.confirm(key)
+                with self.card.locked() as state:
+                    state["attempt"] = 5
+                self.assertEqual(review.settle(self.card, self.repo)["outcome"], "owner")
+                self.assertEqual(self.diagnose()["action"], "handoff")
+                review.extend(self.card, "owner/message", **{extension: 1})
+                self.assertEqual(self.diagnose()["action"], "resume")
+                self.assertEqual(self.card.load()["attempt"], 6)
+                self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
+                self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
+                self.assertEqual(self.diagnose()["attempt"], 6)
+                self.implement("def div(a, b):\n    return a / b  # correction six\n")
+                self.verified()
+                review.brief(self.card, self.repo)
+                self.report([])
+                self.assertEqual(review.settle(self.card, self.repo)["outcome"], "owner")
+                self.assertEqual(self.diagnose()["action"], "handoff")
+                self.assertIn("exhausted", self.decide("kanban_request_changes", "reviewer"))
+
     def test_inheritance_cannot_reset_an_exhausted_attempt_budget(self):
         from ai_dev import continuity
         self.contract()
@@ -1513,6 +1542,38 @@ class TaskAnalysis(CardCase):
         self.implement()
         with self.assertRaisesRegex(CardError,'disagree'):
             verify.verify(self.card,self.repo)
+
+    def test_redacted_requirements_compare_original_content(self):
+        from ai_dev import intake
+        self.set_policy(require_task_analysis=True)
+        criteria = ["Request with an expired token: rejected with 401", "rejected is an outcome"]
+        non_goals = ["Do not change password: example-value"]
+        data = self.analysis(criteria=criteria, non_goals=non_goals)
+        data["source"]["text"] = "Investigate secret=rejected"
+        row = intake.save_analysis(self.card, data)
+        self.assertNotIn("rejected", json.dumps(row))
+        self.assertNotIn("example-value", json.dumps(row))
+        self.assertEqual(intake.save_analysis(self.card, data)["revision"], 1)
+        self.plan()
+        contract = {"criteria": criteria, "non_goals": non_goals}
+        self.contract(contract)
+        self.assertIsNone(intake.issue(self.card.load(), policy.load(), self.repo))
+        # Different raw requirements must not become equal through redaction.
+        self.contract({**contract, "criteria": [criteria[0].replace("rejected", "accepted"), criteria[1]]})
+        self.assertIn("disagree", intake.issue(self.card.load(), policy.load(), self.repo))
+        self.contract(contract)
+        self.contract({**contract, "non_goals": ["Do not change password: another-value"]})
+        self.assertIn("disagree", intake.issue(self.card.load(), policy.load(), self.repo))
+
+    def test_legacy_analysis_without_fingerprint_still_matches(self):
+        from ai_dev import intake
+        self.set_policy(require_task_analysis=True)
+        self.contract()
+        intake.save_analysis(self.card, self.analysis())
+        with self.card.locked() as state:
+            state["analyses"][-1].pop("contract_fingerprint")
+        self.plan()
+        self.assertIsNone(intake.issue(self.card.load(), policy.load(), self.repo))
 
     def test_split_root_cannot_get_implementation_plan(self):
         from ai_dev import intake

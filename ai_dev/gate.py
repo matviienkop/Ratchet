@@ -95,8 +95,9 @@ def _coder(tool_name, env):
         return _attribution(env, state)
     last = verify.last_for(state, tree, "pre_review")
     if last and not last["passed"]:
-        return (f"ai-dev gate: the last verification of this tree ended as {last['result']}. Fix it and run "
-                "`ai-dev-card verify` again; for an environment failure see `ai-dev-card status`.")
+        return (f"ai-dev gate: the last verification of this tree ended as {last['result']}. Run "
+                "`ai-dev-card recover verification` and complete the diagnosis before retrying; "
+                "for an environment failure see `ai-dev-card status`.")
     return ("ai-dev gate: no passing verification exists for the working tree as it is now. Run "
             "`ai-dev-card verify` and request review only after it passes.")
 

@@ -34,7 +34,7 @@ Research date: 2026-11-26. These are different kinds of references, not one univ
 
 ## Durable records and enforcement
 
-`ai-dev-card analysis set --file FILE` stores a validated, redacted revision in `card.json.analyses`; `analysis show` displays the latest. The original source kind/reference/text is preserved across revisions. Later requests and decisions belong in evidence and revised scope, not a replacement source. Repeated identical saves do not create revisions.
+`ai-dev-card analysis set --file FILE` stores a validated, redacted revision in `card.json.analyses`; `analysis show` displays the latest. The original source kind/reference/text is preserved across revisions. Later requests and decisions belong in evidence and revised scope, not a replacement source. Repeated identical saves do not create revisions. Each revision also records a fingerprint of the original criteria and non-goals, so redaction cannot change contract comparisons or hide a requirement change. Build the contract from the original requirements, not the redacted display. Older revisions without a fingerprint still compare their stored requirements; if redaction altered them, save the original analysis again and update its plan.
 
 Analysis records capture the problem, desired result, canonical repository, included/excluded scope, criteria, constraints, facts, hypotheses, evidence with checked/unavailable/not-needed status, blocking unknowns, risks, decomposition and research budget. Ready analysis requires criteria, evidence, risk assessment, no blocking unknowns and one implementation scope. Split roots cannot receive implementation plans. Intermediate blocked analysis is valid and keeps work resumable.
 

@@ -459,9 +459,13 @@ def settle(card, worktree):
                 "`ai-dev-card confirm --finding KEY --file TEST:REPO_PATH -- COMMAND`, or "
                 "`ai-dev-card confirm --finding KEY --cannot-reproduce REASON`.", code=2)
         blocking = sorted(k for k, e in ledger.items() if e["status"] in BLOCKING or findings.inline_pending(e))
-        from .recovery import attempt_limit
+        from .recovery import attempt_limit, correction_facts, correction_key
         limit = attempt_limit(state, settings)
-        outcome = "accept" if not blocking else ("changes" if state.get("attempt", 1) < limit else "owner")
+        facts = correction_facts(state, "review")
+        diagnosis = state.get("diagnoses", {}).get(correction_key("review", facts), {}) if facts else {}
+        authorized = diagnosis.get("authorized")
+        can_correct = state.get("attempt", 1) < limit or (authorized and authorized <= limit)
+        outcome = "accept" if not blocking else ("changes" if can_correct else "owner")
         folder = card.evidence(f"round-{number}")
         fix_brief = folder / "fix-brief.md"
         fix_brief.write_text(_fix_brief(state, rnd, blocking, outcome, limit))

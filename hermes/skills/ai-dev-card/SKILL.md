@@ -21,9 +21,9 @@ Follow the `next` line. The board tools `kanban_request_review`, `kanban_complet
 4. Work only inside the workspace. Keep the change inside the contract. Triage a discovered baseline defect by severity, size and risk: a small suitable fix can join this card after the planner adds its scenario and checks; larger or riskier work goes to a follow-up. Baseline status alone does not require a new card.
 5. Run `ai-dev-card verify`. Exit codes:
    - `0` passed. Go to step 6.
-   - `1` a check failed on your change. Read the log path in the output, fix the code, verify again.
+   - `1` a check failed on your change. Read the log path in the output. Run `ai-dev-card recover verification` and complete the diagnosis before fixing and verifying again.
    - `2` the checks could not judge the change: a command could not start or timed out, or the same check fails on the base revision. Use the recovery procedure below.
-   - `3` the budget of failed verifications is spent. Run `ai-dev-card recover verification` and follow the recovery decision below.
+   - `3` a diagnosis is required or the shared attempt budget is exhausted. Run `ai-dev-card recover verification` and follow the recovery decision below.
 6. When `status` shows `delivery: pr` or `delivery: release`, commit on the card's branch, push it and open the pull request now, so CI runs while the review does. Committing does not change the tree, so the receipt stays valid. Later fixes go to the same branch.
 7. Call `kanban_request_review(summary=..., reviewer=<reviewer from status>)`. In the summary say what changed, which verification passed and the pull request URL if there is one. Stop after this call.
 

@@ -1,4 +1,5 @@
 """Versioned task analysis and implementation plans, independent of the intake channel."""
+import hashlib
 import json
 from pathlib import Path
 
@@ -58,15 +59,22 @@ def validate(data):
     return sanitize(data)
 
 
+def contract_fingerprint(data):
+    payload = [data.get("criteria"), data.get("non_goals", [])]
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
+
+
 def save_analysis(card, data):
-    data = validate(data)
+    cleaned = validate(data)
+    fingerprint = contract_fingerprint(data)
+    data = cleaned
     with card.locked() as state:
         revisions = state.setdefault("analyses", [])
         if revisions and data["source"] != revisions[0]["data"]["source"]:
             raise CardError("Preserve the original source unchanged. Put new requests in evidence and update analysis with ai-dev-card analysis set --file FILE.")
-        if revisions and revisions[-1]["data"] == data:
+        if revisions and revisions[-1]["data"] == data and revisions[-1].get("contract_fingerprint") == fingerprint:
             return revisions[-1]
-        row = {"revision": len(revisions) + 1, "at": now(), "data": data}
+        row = {"revision": len(revisions) + 1, "at": now(), "data": data, "contract_fingerprint": fingerprint}
         revisions.append(row)
         record(state, "analysis." + data["readiness"], revision=row["revision"], source_kind=data["source"]["kind"])
         return row
@@ -102,7 +110,9 @@ def issue(state, settings, workspace):
     if plan.get("analysis_revision") != analysis.get("revision"):
         return "The implementation plan is missing or stale. Run ai-dev-card plan set --file FILE after analyzing the current request."
     contract = state.get("contract") or {}
-    if data["criteria"] != contract.get("criteria") or data["non_goals"] != contract.get("non_goals", []):
+    # Compare original requirements without persisting their unredacted text.
+    expected = analysis.get("contract_fingerprint") or contract_fingerprint(data)
+    if expected != contract_fingerprint(contract):
         return "The contract and task analysis disagree. Reconcile ai-dev-card analysis set and contract set, then record the updated plan."
     if data["repository"] not in (str(gitio.main_repo(workspace)), gitio.origin(workspace)):
         return "Analysis targets another repository. Correct it with ai-dev-card analysis set --file FILE and record a new plan."
