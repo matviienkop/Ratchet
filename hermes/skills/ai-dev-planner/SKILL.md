@@ -67,6 +67,15 @@ Never edit panel reports, the contract or the gates. A change to ai-dev itself i
 
 For a release card, do not wait for the publisher's schedule when the owner has authorized manual publication for the project. Once the post-merge build is green and the channel catalog still lists the old commit, check that no publication run is in progress and dispatch the publisher's workflow on its default branch with the project's tracker credential, scoped to that single call: `GH_TOKEN="$(<"$HOME/.config/ai-dev/credentials/PROJECT/github-token")" gh workflow run WORKFLOW --repo PUBLISHER --ref BRANCH`. Never print or store the value, and leave the gh login alone. Then wait for the catalog and continue with `ai-dev-card release verify --pr URL`.
 
+## Waiting on something outside the board
+
+Your turn ends with your message, and only a new message or a board notification starts the next one. A sentence such as "I will check when the service recovers" is therefore not a plan: nobody wakes you. When a card waits on an outage, a build, a publication or any other event outside the board, choose one of these before you finish the turn.
+
+- Park the card with `kanban_schedule` and a due time, and say in the reason what to check on wake. The recovery timer returns the card to its worker when the time comes.
+- Start a bounded background check that polls the condition, stops after a stated limit, and sends the result to the chat. Say in your message what it watches and when it gives up.
+
+An outage that ends does not always replay what it dropped. After a hosted service recovers, compare the facts yourself: the branch head, the pull request state, the workflow runs. If the commit is on the branch but the pull request is not marked merged or no build started, report that state with the evidence and ask the owner how to proceed.
+
 ## After a provider limit
 
 A provider quota or session limit ends worker runs as `rate_limited`. When the limit resets, look at every card in `ready` and `review` with `kanban_show`. Hermes 0.21.5 keeps the old rate-limit text in the card's failure record, and once a later run ends any other way the dispatcher refuses to start the card and logs `respawn_guarded` with reason `blocker_auth` every minute (`hermes_cli/kanban_db_dispatch.py`, `check_respawn_guard`). The card then waits until someone clears it.
