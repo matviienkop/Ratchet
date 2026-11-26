@@ -81,7 +81,7 @@ def import_finding(card, workspace, filename):
         raise CardError("Use an HTTPS comment URL without credentials in ai-dev-card finding import --file FILE.")
     report = review.validate_report({"findings": [payload["finding"]]})
     with card.locked() as state:
-        _, _, tree = verify.prepare(state, workspace)
+        _, settings, tree = verify.prepare(state, workspace)
         rnd = state["rounds"][-1] if state["rounds"] else None
         if not rnd or rnd["tree"] != tree or payload["tree"] != tree or rnd["outcome"] == "owner":
             raise CardError("Import against the current reviewed tree. Run ai-dev-card review brief; at the cap run ai-dev-card recover review.")
@@ -148,8 +148,13 @@ def resolve(card, workspace, key, outcome, reason, evidence=None, ticket=None):
             site = urlsplit(ticket or "")
             if site.scheme != "https" or not site.hostname or site.username or site.password:
                 raise CardError("Run ai-dev-card finding resolve KEY --outcome deferred --ticket HTTPS_URL --reason TEXT.")
+            from .recovery import attempt_limit
+            diagnosed = any(d.get("child") and d.get("kind") == "review"
+                            and d["facts"].get("tree") == tree and key in d["facts"].get("blocking", [])
+                            for d in state.get("diagnoses", {}).values())
             late_regression = (entry["status"] == "confirmed" and entry.get("sources")
-                               and len(state.get("late_returns", [])) >= 2)
+                               and entry.get("severity") in ("low", "medium") and diagnosed
+                               and state.get("attempt", 1) >= attempt_limit(state, settings))
             if (contractual(entry, state["contract"]) or entry["status"] in ("gap", "candidate")
                     or entry["status"] == "confirmed" and not late_regression):
                 raise CardError("This finding still blocks acceptance. Fix it or use ai-dev-card finding waive KEY --owner-ref MESSAGE --reason TEXT; a ticket alone cannot discharge it.")
@@ -177,7 +182,7 @@ def late_return(card, workspace, reason):
     if not reason:
         raise CardError("Run ai-dev-card finding return --reason TEXT before the native late return.")
     with card.locked() as state:
-        _, _, tree = verify.prepare(state, workspace)
+        _, settings, tree = verify.prepare(state, workspace)
         rnd = state["rounds"][-1] if state["rounds"] else None
         keys = sorted(k for k, e in state["ledger"].items() if e["status"] == "confirmed" and e.get("sources") or inline_pending(e))
         if not rnd or rnd["tree"] != tree or rnd["outcome"] != "accept" or not keys:
@@ -188,8 +193,8 @@ def late_return(card, workspace, reason):
             raise CardError("Run ai-dev-card finding return inside the active Hermes worker or planner session.")
         if returns and returns[-1]["tree"] == tree and returns[-1].get("run") == run:
             return returns[-1]
-        if len(returns) >= 2:
-            raise CardError("Two late returns are already recorded. Use finding resolve --outcome deferred --ticket URL for residual regressions; contract violations require finding waive with an owner reference.")
+        from .recovery import require_diagnosis
+        require_diagnosis(state, settings)
         entry = {"number": len(returns) + 1, "tree": tree, "run": run, "findings": keys, "reason": reason, "at": now(),
                  "next": "Call kanban_request_changes with these finding keys and their reproduction evidence; the planner can use native reopen-review if the card is already done."}
         returns.append(entry)

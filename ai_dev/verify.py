@@ -221,14 +221,11 @@ def verify(card, worktree, stage="pre_review", rerun=False):
         if not state["frozen"]:
             state["frozen"] = True
             record(state, "contract.frozen", digest=digest(contract))
+        from .recovery import require_diagnosis
+        require_diagnosis(state, settings)
         previous = passing_receipt(state, settings, tree, stage)
         if previous and not rerun:
             return previous, 0
-        limit = settings["max_defect_failures"] + state["extra_failures"]
-        if state["counters"]["defect"] >= limit:
-            raise CardError(
-                f"The verification budget is spent: {state['counters']['defect']} failed attempts, limit {limit}. "
-                "Run ai-dev-card recover verification to dispatch the incident or retrieve its decision.", code=3)
         number = len(state["verifications"]) + 1
         commit = gitio.anchor(worktree, f"{card.board}/{card.id}/v{number}", tree, state["base"])
         folder = card.evidence(f"verify-{number}")

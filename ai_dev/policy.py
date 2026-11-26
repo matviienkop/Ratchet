@@ -33,12 +33,13 @@ DEFAULTS = {
     "checks": [],
     "check_timeout": 900,
     "base_probe": True,
-    "max_defect_failures": 6,
+    "max_defect_failures": 5,
+    "max_attempts": 5,
     "delivery": "local",
     "release": None,
     "pr_ci": None,
     "require_scenario_evidence": True,
-    "review": {"max_rounds": 3, "author_model": None, "primary_model": None, "reviewer": "reviewer", "panel": [OPENAI_PANEL, CLAUDE_PANEL], "panel_required": True,
+    "review": {"max_rounds": 5, "author_model": None, "primary_model": None, "reviewer": "reviewer", "panel": [OPENAI_PANEL, CLAUDE_PANEL], "panel_required": True,
                "panel_timeout": 1200, "max_prompt_bytes": 400_000, "confirm_timeout": 600},
 }
 
@@ -114,7 +115,7 @@ def load(repo=None, origin=None):
     for key in ("max_rounds", "panel_timeout", "max_prompt_bytes", "confirm_timeout"):
         if type(review[key]) is not int or review[key] < 1:
             raise CardError(f"Policy file {path}: review.{key} must be a positive integer.")
-    for key in ("check_timeout", "max_defect_failures"):
+    for key in ("check_timeout", "max_defect_failures", "max_attempts"):
         if type(result[key]) is not int or result[key] < 1:
             raise CardError(f"Policy file {path}: {key} must be a positive integer.")
     for key in ("author_model", "primary_model"):

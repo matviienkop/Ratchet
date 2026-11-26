@@ -102,6 +102,18 @@ class CardCase(unittest.TestCase):
         path.write_text(textwrap.dedent(text).lstrip("\n"))
         return review.confirm(self.card, self.repo, key, files=[(str(path), name)], argv=[PY, "-m", "unittest", "-q", name[:-3]])
 
+    def diagnose(self, kind="review"):
+        request, _ = recovery.recover(self.card, self.repo, kind)
+        if request["action"] != "dispatch":
+            return request
+        marker = request["repair_request"]["idempotency_key"]
+        child = "diag_" + marker[-16:]
+        detail = {"task": {"id": child, "status": "done", "body": marker,
+                           "skills": ["ai-dev-repair"]}, "children": [self.card.id],
+                  "latest_summary": "The reproduction isolates the missing branch; correct that branch and rerun it."}
+        with patch.object(recovery, "native_show", return_value=detail):
+            return recovery.recover(self.card, self.repo, kind, child)[0]
+
     def decide(self, tool, lane):
         return gate.decide(tool, {}, lane=lane)
 
@@ -150,11 +162,13 @@ class Verification(CardCase):
             self.write("calc.py", f"def add(a, b):\n    return a - b + {attempt}\n")
             receipt, code = verify.verify(self.card, self.repo)
             self.assertEqual((code, receipt["result"], receipt["checks"][0]["klass"]), (1, "defect", "fail"))
+            self.diagnose("verification")
         self.implement()
         with self.assertRaises(CardError) as refused:
             verify.verify(self.card, self.repo)
         self.assertEqual(refused.exception.code, 3)
         review.extend(self.card, "msg-1", failures=1)
+        self.diagnose("verification")
         self.assertEqual(verify.verify(self.card, self.repo)[1], 0)
 
     def test_environment_and_pre_existing_failures_are_not_charged(self):
@@ -288,6 +302,8 @@ class ReviewRounds(CardCase):
         settled = review.settle(self.card, self.repo)
         self.assertEqual((settled["outcome"], settled["blocking"]), ("changes", [key]))
         self.assertIn("test_repro.py", Path(settled["fix_brief"]).read_text())
+        self.diagnose("verification")
+        self.diagnose("review")
         self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
         self.assertIn("not accept", self.decide("kanban_complete", "reviewer"))
 
@@ -388,6 +404,8 @@ class ReviewRounds(CardCase):
         self.assertEqual((again["round"], again["settled"]), (1, "changes"))
         self.assertEqual(len(self.card.load()["rounds"]), 1)
         self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
+        self.diagnose("verification")
+        self.diagnose("review")
         self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
 
     def test_a_claim_raised_again_is_judged_as_stated_now(self):
@@ -457,6 +475,7 @@ class ReviewRounds(CardCase):
         key = self.report([gap])["findings"][0]["key"]
         review.assess(self.card, self.repo, key, "medium", "Current suite covers addition only.", "test_calc.py")
         self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
+        self.diagnose()
         self.write("test_div.py", "import unittest, calc\nclass D(unittest.TestCase):\n    def test_div(self):\n        self.assertEqual(calc.div(4, 2), 2)\n")
         self.verified()
         review.brief(self.card, self.repo)
@@ -473,6 +492,7 @@ class ReviewRounds(CardCase):
         key = self.report([self.blocker()])["to_confirm"][0]
         self.confirm(key)
         self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
+        self.diagnose()
         self.write("calc.py", (self.repo / "calc.py").read_text() + "# attempt 2, still wrong\n")
         self.verified()
         second = review.brief(self.card, self.repo)
@@ -481,7 +501,7 @@ class ReviewRounds(CardCase):
         settled = review.settle(self.card, self.repo)
         self.assertEqual(settled["outcome"], "owner")
         self.assertIn("Recovery decision", Path(settled["fix_brief"]).read_text())
-        self.assertIn("round cap", self.decide("kanban_request_changes", "reviewer"))
+        self.assertIn("recover review", self.decide("kanban_request_changes", "reviewer"))
         self.assertIn("recover review", self.decide("kanban_complete", "reviewer"))
         review.extend(self.card, "msg-3", rounds=1)
         self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
@@ -525,6 +545,8 @@ class ReviewRounds(CardCase):
         self.assertIn("accept", self.decide("kanban_request_changes", "reviewer"))
         self.assertEqual(verify.verify(self.card, self.repo, stage="post_review")[1], 1)
         self.assertIn("kanban_request_changes", self.decide("kanban_complete", "reviewer"))
+        self.diagnose("verification")
+        self.diagnose("review")
         self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
 
     def test_two_reviewers_share_one_finding_by_mechanism(self):
@@ -964,9 +986,12 @@ class AcceptanceEvidence(CardCase):
         self.assertEqual(self.confirm(key)["status"], "confirmed")
         with self.assertRaisesRegex(CardError, "blocks acceptance"):
             findings.resolve(self.card, self.repo, key, "deferred", "old defect", ticket="https://example.com/issues/2")
+        self.diagnose()
         self.assertIn("finding return", self.decide("kanban_request_changes", "reviewer"))
         self.assertEqual(findings.late_return(self.card, self.repo, "Confirmed contract violation")["number"], 1)
         self.assertEqual(findings.late_return(self.card, self.repo, "Retry")["number"], 1)
+        self.diagnose("verification")
+        self.diagnose("review")
         self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
 
     def test_hosted_comment_for_another_tree_is_refused(self):
@@ -1008,7 +1033,7 @@ class AcceptanceEvidence(CardCase):
         self.confirm(key)
         with self.card.locked() as state:
             state["late_returns"] = [{"tree": "a"}, {"tree": "b"}]
-        with self.assertRaisesRegex(CardError, "Two late returns"):
+        with self.assertRaisesRegex(CardError, "recover review"):
             findings.late_return(self.card, self.repo, "third")
         with self.assertRaisesRegex(CardError, "blocks acceptance"):
             findings.resolve(self.card, self.repo, key, "deferred", "cap", ticket="https://example.com/issues/2")
@@ -1111,13 +1136,13 @@ class AcceptanceEvidence(CardCase):
         self.accepted()
         key = self.imported()["key"]
         self.confirm(key)
+        self.diagnose()
         findings.late_return(self.card, self.repo, "first")
-        with patch.dict(os.environ, {"HERMES_KANBAN_RUN_ID": "run-2"}):
-            self.assertIn("finding return", self.decide("kanban_request_changes", "reviewer"))
-            self.assertEqual(findings.late_return(self.card, self.repo, "second")["number"], 2)
-        with patch.dict(os.environ, {"HERMES_KANBAN_RUN_ID": "run-3"}):
-            with self.assertRaisesRegex(CardError, "Two late returns"):
-                findings.late_return(self.card, self.repo, "third")
+        for number in (2, 3):
+            with patch.dict(os.environ, {"HERMES_KANBAN_RUN_ID": f"run-{number}"}):
+                self.assertIn("finding return", self.decide("kanban_request_changes", "reviewer"))
+                self.assertEqual(findings.late_return(self.card, self.repo, "resumed session")["number"], number)
+                self.assertEqual(self.card.load()["attempt"], 2)
 
     def test_new_pre_review_check_invalidates_completion(self):
         self.accepted()
@@ -1152,7 +1177,10 @@ class AcceptanceEvidence(CardCase):
         self.assertEqual((decision["decision"], decision["priority"]), ("inline", "P2"))
         with self.assertRaisesRegex(CardError, "test to pass"):
             findings.resolve(self.card, self.repo, key, "resolved", "Not actually fixed", "calc.py")
+        self.diagnose()
         findings.late_return(self.card, self.repo, "Small baseline correction selected inline")
+        self.diagnose("verification")
+        self.diagnose("review")
         self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
         self.write("calc.py", "def add(a,b):\n    if a == b == 0: raise ValueError('zero')\n    return a+b\n\ndef div(a,b):\n    return a/b\n")
         self.verified()
@@ -1205,7 +1233,10 @@ class AcceptanceEvidence(CardCase):
         key = self.report([self.blocker(**{"class":"discovery", "violates":"regression"})])["findings"][0]["key"]
         review.settle(self.card, self.repo)
         findings.triage(self.card, key, "S", None, "Small local correction")
+        self.diagnose()
         self.assertEqual(findings.late_return(self.card, self.repo, "Selected inline")["number"], 1)
+        self.diagnose("verification")
+        self.diagnose("review")
         self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
 
     def test_mixed_panel_note_retains_baseline_triage_obligation(self):
@@ -1222,3 +1253,66 @@ class AcceptanceEvidence(CardCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiagnosedAttempts(CardCase):
+    def test_five_review_attempts_require_diagnosis_and_then_stop(self):
+        self.contract()
+        for attempt in range(1, 6):
+            self.implement(f"def div(a, b):\n    return a / b  # attempt {attempt}\n")
+            self.verified()
+            review.brief(self.card, self.repo)
+            if attempt == 1:
+                key = self.report([self.blocker()])["to_confirm"][0]
+                self.confirm(key)
+            else:
+                self.report([])
+            result = review.settle(self.card, self.repo)
+            self.assertEqual(result["outcome"], "changes" if attempt < 5 else "owner")
+            self.assertIn("recover review", self.decide("kanban_request_changes", "reviewer"))
+            self.assertIn("recover review", self.decide("kanban_request_review", "coder"))
+            diagnosis = self.diagnose()
+            self.assertEqual(diagnosis["action"], "resume" if attempt < 5 else "handoff")
+            if attempt < 5:
+                self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
+                self.assertIn("already failed review", self.decide("kanban_request_review", "coder"))
+        self.assertEqual(self.card.load()["attempt"], 5)
+        self.assertIn("exhausted", self.decide("kanban_request_changes", "reviewer"))
+        self.implement("def div(a, b):\n    if not b: raise ValueError('zero')\n    return a / b\n")
+        with self.assertRaisesRegex(CardError, "exhausted"):
+            self.verified()
+
+    def test_inheritance_cannot_reset_an_exhausted_attempt_budget(self):
+        from ai_dev import continuity
+        self.contract()
+        with self.card.locked() as state:
+            state["attempt"] = 5
+        target = Card("test", "rewrite")
+        continuity.inherit(target, self.card)
+        self.implement()
+        with self.assertRaisesRegex(CardError, "inherited attempt budget"):
+            verify.verify(target, self.repo)
+        self.assertEqual(target.load()["attempt"], 6)
+        self.assertEqual(self.card.load()["attempt"], 5)
+
+    def test_confirmed_critical_regression_cannot_be_deferred_at_limit(self):
+        self.contract()
+        self.implement()
+        self.verified()
+        review.brief(self.card, self.repo)
+        key = self.report([self.blocker(violates="regression", severity="critical")])["to_confirm"][0]
+        with self.card.locked() as state:
+            entry = state["ledger"][key]
+            entry.update(status="confirmed", sources=[{"url": "https://example.org/review/1"}])
+            state["attempt"] = 5
+            state["late_returns"] = [{"tree": "a"}, {"tree": "b"}]
+        with self.assertRaisesRegex(CardError, "blocks acceptance"):
+            findings.resolve(self.card, self.repo, key, "deferred", "attempt limit", ticket="https://example.org/issues/1")
+        with self.card.locked() as state:
+            state["ledger"][key]["severity"] = "medium"
+            state["rounds"][-1].update(outcome="accept", fix_brief="brief")
+        with self.assertRaisesRegex(CardError, "blocks acceptance"):
+            findings.resolve(self.card, self.repo, key, "deferred", "no final diagnosis", ticket="https://example.org/issues/1")
+        self.assertEqual(self.diagnose()["action"], "handoff")
+        findings.resolve(self.card, self.repo, key, "deferred", "Diagnosed non-contract work", ticket="https://example.org/issues/1")
+        self.assertEqual(self.card.load()["ledger"][key]["status"], "deferred")

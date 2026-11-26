@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from . import gitio, policy as policies, release, review, verify, findings
+from . import gitio, policy as policies, release, review, verify, findings, recovery
 from .store import Card, CardError, identity
 
 ROLES = ("planner", "coder", "reviewer")
@@ -76,6 +76,13 @@ def _coder(tool_name, env):
     if not state["contract"]:
         return ("ai-dev gate: this card has no contract. Run `ai-dev-card contract set --file FILE`, then "
                 "`ai-dev-card verify`.")
+    for kind in ("verification", "review"):
+        issue = recovery.correction_issue(state, settings, kind)
+        if issue:
+            return "ai-dev gate: " + issue
+    rnd = state["rounds"][-1] if state["rounds"] else {}
+    if rnd.get("tree") == tree and rnd.get("outcome") in ("changes", "owner"):
+        return "ai-dev gate: this candidate already failed review. Apply the diagnosed correction and run ai-dev-card verify."
     if verify.passing_receipt(state, settings, tree, "pre_review"):
         return _attribution(env, state)
     last = verify.last_for(state, tree, "pre_review")
@@ -103,6 +110,10 @@ def _reviewer(tool_name, env, args):
     post_last = verify.last_for(state, tree, "post_review") if post_checks else None
     post_defect = bool(post_last and post_last["result"] == "defect" and not post_passed)
     if tool_name == "kanban_request_changes":
+        for kind in ("verification", "review"):
+            issue = recovery.correction_issue(state, settings, kind)
+            if issue:
+                return "ai-dev gate: " + issue
         if outcome == "changes" or (outcome == "accept" and post_defect):
             return None
         if outcome == "accept":

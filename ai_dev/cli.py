@@ -69,7 +69,7 @@ def status(args):
     else:
         step = "Implement the contract, then run `ai-dev-card verify`."
     if settings:
-        for boundary in ("provider", "review", "verification"):
+        for boundary in ("provider",):
             if recovery.trigger(state, settings, boundary):
                 incident = state.get("recoveries", {}).get(boundary, {})
                 if boundary == "review" and incident.get("child") and incident["facts"]["round"] == rnd["n"]:
@@ -78,6 +78,14 @@ def status(args):
                     step = "Run ai-dev-card review panel once using the completed diagnosis."
                 elif boundary != "verification" or not verified:
                     step = f"Run ai-dev-card recover {boundary}. Resume with the linked child ID when it is done."
+                break
+    if settings:
+        result["attempt"] = state.get("attempt", 1)
+        result["max_attempts"] = recovery.attempt_limit(state, settings)
+        for kind in ("verification", "review"):
+            issue = recovery.correction_issue(state, settings, kind)
+            if issue:
+                step = issue
                 break
     result["next"] = step
     return result, 0
@@ -104,7 +112,7 @@ def contract(args):
 def run_verify(args):
     receipt, code = verify.verify(_card(args), _workspace(args), stage=args.stage, rerun=args.rerun)
     hint = {0: "Passed. Call kanban_request_review." if args.stage == "pre_review" else "Passed. Run ai-dev-card review settle for the delivery step.",
-            1: "A check failed on your change. Read the log, fix the code and verify again.",
+            1: "A check failed on your change. Run ai-dev-card recover verification and complete the diagnosis before retrying.",
             2: "The checks could not judge the change (environment, or a failure that the base has too). "
                "Follow the recovery section of the ai-dev-card skill with the receipt and repair_requests."}[code]
     return {**receipt, "next": hint}, code

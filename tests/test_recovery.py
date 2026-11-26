@@ -11,26 +11,36 @@ class Recovery(CardCase):
         return {"task": {"id":child, "status":"done", "body":marker + "\nDiagnosis", "skills":["ai-dev-repair"]},
                 "children":[self.card.id], "latest_summary":"Base probe passed after fixture repair; rerun the check."}
 
-    def test_one_verified_diagnosis_before_another_failed_check(self):
-        self.set_policy(max_defect_failures=1)
+    def test_each_failed_attempt_needs_a_new_diagnosis_and_five_is_final(self):
         self.contract()
-        self.write("calc.py", "def add(a, b): return 0\n")
-        self.assertEqual(verify.verify(self.card, self.repo)[1], 1)
-        request = recovery.recover(self.card, self.repo, "verification")[0]
-        self.assertEqual(request["action"], "dispatch")
-        self.assertEqual(request, recovery.recover(self.card, self.repo, "verification")[0])
-        child = "t_x"
-        detail = self.completed(child, request["repair_request"]["idempotency_key"])
-        with patch.object(recovery, "native_show", return_value={**detail,"children":[]}):
-            with self.assertRaises(CardError):
-                recovery.recover(self.card, self.repo, "verification", child)
-        with patch.object(recovery, "native_show", return_value=detail):
-            for _ in range(2):
-                self.assertEqual(recovery.recover(self.card, self.repo, "verification", child)[0]["action"], "resume")
-        self.assertEqual(self.card.load()["extra_failures"], 1)
-        self.write("calc.py", "def add(a, b): return -1\n")
-        self.assertEqual(verify.verify(self.card, self.repo)[1], 1)
-        self.assertEqual(recovery.recover(self.card, self.repo, "verification")[0]["action"], "handoff")
+        markers = []
+        for attempt in range(1, 6):
+            self.write("calc.py", f"def add(a, b): return {-attempt}\n")
+            self.assertEqual(verify.verify(self.card, self.repo)[1], 1)
+            with self.assertRaisesRegex(CardError, "recover verification"):
+                verify.verify(self.card, self.repo, rerun=True)
+            request = recovery.recover(self.card, self.repo, "verification")[0]
+            self.assertEqual(request["action"], "dispatch")
+            self.assertEqual(request, recovery.recover(self.card, self.repo, "verification")[0])
+            marker = request["repair_request"]["idempotency_key"]
+            markers.append(marker)
+            detail = self.completed("t_diag", marker)
+            with patch.object(recovery, "native_show", return_value={**detail, "children": []}):
+                with self.assertRaises(CardError):
+                    recovery.recover(self.card, self.repo, "verification", "t_diag")
+            with patch.object(recovery, "native_show", return_value=detail):
+                for _ in range(2):
+                    result = recovery.recover(self.card, self.repo, "verification", "t_diag")[0]
+                    self.assertEqual(result["action"], "resume" if attempt < 5 else "handoff")
+            self.assertEqual(self.card.load()["attempt"], min(attempt + 1, 5))
+            self.assertEqual(self.card.load()["extra_failures"], 0)
+        self.assertEqual(len(set(markers)), 5)
+        self.implement()
+        with self.assertRaisesRegex(CardError, "budget is exhausted"):
+            verify.verify(self.card, self.repo)
+        review.extend(self.card, "owner-message", rounds=1)
+        self.assertEqual(self.diagnose("verification")["attempt"], 6)
+        self.verified()
 
     def test_quota_wait_retries_only_after_event_and_deadline(self):
         self.policy.write_text(json.dumps({"defaults":{"require_scenario_evidence":False,"target_branch":"main","checks":[{"name":"unit","argv":SUITE}]}}))
@@ -71,27 +81,22 @@ class Recovery(CardCase):
         state["rounds"][0]["panel"]["astra"]={"status":"ok","runtime":{"session_id":"actual"}}
         self.assertTrue(recovery.progressed(state,"provider",first,second))
 
-    def test_same_review_blocker_does_not_reset_limit_but_resolved_prior_findings_do(self):
+    def test_review_and_verification_share_budget_without_reset_on_new_findings(self):
         self.contract()
+        self.write("calc.py", "def add(a, b): return 0\n")
+        verify.verify(self.card, self.repo)
+        self.assertEqual(self.diagnose("verification")["attempt"], 2)
         self.implement()
         self.verified()
-        self.set_policy(review={"max_rounds":1})
-        with self.card.locked() as state:
-            state["rounds"] = [{"n":1,"tree":"one","outcome":"owner","blocking":["k1"],"fix_brief":"brief-1"}]
-            state["ledger"] = {"k1":{"status":"confirmed"}}
-        req = recovery.recover(self.card,self.repo,"review")[0]["repair_request"]
-        with patch.object(recovery,"native_show",return_value=self.completed("t_diag",req["idempotency_key"])):
-            self.assertEqual(recovery.recover(self.card,self.repo,"review","t_diag")[0]["action"],"resume")
-        self.assertEqual(recovery.recover(self.card,self.repo,"review")[0]["action"],"resume")
-        with self.card.locked() as state:
-            state["rounds"].append({"n":2,"tree":"two","outcome":"owner","blocking":["k1"],"fix_brief":"new"})
-        self.assertEqual(recovery.recover(self.card,self.repo,"review")[0]["action"],"handoff")
-        with self.card.locked() as state:
-            state["ledger"]["k1"]["status"]="fixed"
-            state["rounds"][-1]["blocking"]=["k2"]
-        new = recovery.recover(self.card,self.repo,"review")[0]
-        self.assertEqual(new["action"], "dispatch")
-        self.assertNotEqual(new["repair_request"]["idempotency_key"], req["idempotency_key"])
+        for number in range(1, 5):
+            with self.card.locked() as state:
+                state["rounds"] = [{"n": number, "tree": str(number), "outcome": "changes",
+                                    "blocking": [f"k{number}"], "fix_brief": "brief"}]
+                state["ledger"] = {f"k{number}": {"status": "confirmed"}}
+            result = self.diagnose()
+            self.assertEqual(result["action"], "resume" if number < 4 else "handoff")
+        self.assertEqual(self.card.load()["attempt"], 5)
+        self.assertEqual(self.card.load()["extra_rounds"], 0)
 
     def test_transient_waits_exhaust_to_diagnosis_without_infinite_polling(self):
         incident={"marker":"incident"}

@@ -173,6 +173,8 @@ def brief(card, worktree):
             return {**stored, "settled": last["outcome"],
                     "next": [f"This tree was already reviewed: round {last['n']} settled as {last['outcome']}. "
                              "Run `ai-dev-card review settle` to see the board call to make."]}
+        from .recovery import attempt_limit, require_diagnosis
+        require_diagnosis(state, settings)
         rnd = _open_round(state, required=False)
         if rnd and rnd["tree"] != tree:
             if rnd["outcome"] == "owner":
@@ -209,7 +211,8 @@ def brief(card, worktree):
             delta = gitio.changed_files(worktree, rnd["previous_commit"], rnd["commit"])
         ledger = state["ledger"].values()
         result = {
-            "round": rnd["n"], "max_rounds": settings["review"]["max_rounds"] + state["extra_rounds"],
+            "round": rnd["n"], "attempt": state.get("attempt", 1), "max_attempts": attempt_limit(state, settings),
+            "max_rounds": settings["review"]["max_rounds"] + state["extra_rounds"],
             "mode": rnd["mode"], "tree": tree, "base": state["base"], "files": files,
             "changed_files": gitio.changed_files(worktree, state["base"], rnd["commit"]), "delta_files": delta,
             "contract": state["contract"],
@@ -456,8 +459,9 @@ def settle(card, worktree):
                 "`ai-dev-card confirm --finding KEY --file TEST:REPO_PATH -- COMMAND`, or "
                 "`ai-dev-card confirm --finding KEY --cannot-reproduce REASON`.", code=2)
         blocking = sorted(k for k, e in ledger.items() if e["status"] in BLOCKING or findings.inline_pending(e))
-        limit = review["max_rounds"] + state["extra_rounds"]
-        outcome = "accept" if not blocking else ("changes" if number < limit else "owner")
+        from .recovery import attempt_limit
+        limit = attempt_limit(state, settings)
+        outcome = "accept" if not blocking else ("changes" if state.get("attempt", 1) < limit else "owner")
         folder = card.evidence(f"round-{number}")
         fix_brief = folder / "fix-brief.md"
         fix_brief.write_text(_fix_brief(state, rnd, blocking, outcome, limit))
@@ -504,12 +508,13 @@ def _next(outcome, fix_brief, post_due):
                     "on the change, call kanban_request_changes(reason=...) with the failing check and its log.")
         return step
     if outcome == "changes":
-        return f"Call kanban_request_changes(reason=...) and put the contents of {fix_brief} in the reason."
-    return f"The round cap is reached. Run ai-dev-card recover review. Give the diagnosis worker {fix_brief}."
+        return f"Run ai-dev-card recover review before kanban_request_changes; include the diagnosis and {fix_brief}."
+    return f"The attempt cap is reached. Run ai-dev-card recover review. Give the diagnosis worker {fix_brief}."
 
 
 def _fix_brief(state, rnd, blocking, outcome, limit):
-    lines = [f"# Review round {rnd['n']} of {limit}: {outcome}", "", f"Candidate tree: {rnd['tree']}"]
+    lines = [f"# Review round {rnd['n']}: {outcome}", "",
+             f"Implementation attempt: {state.get('attempt', 1)} of {limit}", "", f"Candidate tree: {rnd['tree']}"]
     for name, result in rnd["panel"].items():
         runtime = result.get("runtime") or {}
         report = rnd["reports"].get(name)
