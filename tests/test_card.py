@@ -936,8 +936,6 @@ class CommandLine(CardCase):
         self.assertEqual(self.run_cli("finding", "waive", key)[0], 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class AcceptanceEvidence(CardCase):
@@ -983,6 +981,7 @@ class AcceptanceEvidence(CardCase):
         self.assertIsNotNone(self.decide("kanban_complete", "reviewer"))
         with self.assertRaises(CardError):
             findings.resolve(self.card, self.repo, key, "deferred", "Exists on base")
+        findings.triage(self.card, key, "M", "followup", "Requires an independent subsystem change")
         findings.resolve(self.card, self.repo, key, "deferred", "Outside this contract; exists on base", ticket="https://example.com/issues/2")
         self.assertEqual(self.card.load()["ledger"][key]["status"], "deferred")
         self.assertIsNone(self.decide("kanban_complete", "reviewer"))
@@ -1068,6 +1067,7 @@ class AcceptanceEvidence(CardCase):
         with patch("sys.stdout"):
             self.assertEqual(cli.main(["finding", "import", "--file", str(path)]), 0)
             key = next(iter(self.card.load()["ledger"]))
+            self.assertEqual(cli.main(["finding", "triage", key, "--size", "M", "--reason", "Separate subsystem"]), 0)
             self.assertEqual(cli.main(["finding", "resolve", key, "--outcome", "deferred", "--ticket", "https://example.com/2", "--reason", "baseline"]), 0)
 
     def test_hosted_gap_can_be_assessed_after_acceptance(self):
@@ -1137,3 +1137,88 @@ class AcceptanceEvidence(CardCase):
         self.imported(self.blocker(kind="gap"))
         self.assertEqual(self.card.load()["ledger"][key]["status"], "note")
         self.assertIn(key, findings.pending(self.card.load()))
+
+    def test_small_baseline_defect_is_fixed_in_the_current_card(self):
+        self.accepted()
+        key = self.imported(self.blocker(violates="regression", mechanism="baseline zero addition"))["key"]
+        self.confirm(key, body="""
+            import unittest, calc
+            class R(unittest.TestCase):
+                def test_zero_add(self):
+                    with self.assertRaises(ValueError): calc.add(0, 0)
+            """)
+        self.assertEqual(self.card.load()["ledger"][key]["status"], "discovery")
+        decision = findings.triage(self.card, key, "S", None, "One local guard, compatible with the current scope")
+        self.assertEqual((decision["decision"], decision["priority"]), ("inline", "P2"))
+        with self.assertRaisesRegex(CardError, "test to pass"):
+            findings.resolve(self.card, self.repo, key, "resolved", "Not actually fixed", "calc.py")
+        findings.late_return(self.card, self.repo, "Small baseline correction selected inline")
+        self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
+        self.write("calc.py", "def add(a,b):\n    if a == b == 0: raise ValueError('zero')\n    return a+b\n\ndef div(a,b):\n    return a/b\n")
+        self.verified()
+        packet = review.brief(self.card, self.repo)
+        self.assertTrue(packet["rechecks"][0]["fixed"])
+        self.report([])
+        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
+        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
+        self.assertEqual(self.card.load()["ledger"][key]["triage"]["decision"], "inline")
+
+    def test_baseline_followup_requires_importance_and_complexity_analysis(self):
+        self.accepted()
+        key = self.imported(self.blocker(**{"class":"discovery", "violates":"regression"}))["key"]
+        with self.assertRaisesRegex(CardError, "Analyze importance"):
+            findings.resolve(self.card, self.repo, key, "deferred", "Baseline", ticket="https://example.com/2")
+        with self.assertRaises(CardError):
+            findings.triage(self.card, key, "M", "not-planned", "Material but inconvenient")
+        decision = findings.triage(self.card, key, "M", None, "Needs a separate migration and rollback plan")
+        self.assertEqual(decision["decision"], "followup")
+        findings.resolve(self.card, self.repo, key, "deferred", "Separate migration", ticket="https://example.com/2")
+        self.assertEqual(self.card.load()["ledger"][key]["disposition"]["triage"]["size"], "M")
+
+    def test_small_but_risky_baseline_fix_can_have_an_explicit_followup(self):
+        self.accepted()
+        key = self.imported(self.blocker(**{"class":"discovery", "violates":"regression"}))["key"]
+        findings.triage(self.card, key, "S", "followup", "Few lines but requires an incompatible schema decision")
+        findings.resolve(self.card, self.repo, key, "deferred", "Compatibility decision", ticket="https://example.com/2")
+        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
+
+    def test_baseline_triage_cannot_defer_a_promised_contract_fix(self):
+        self.accepted()
+        key = self.imported(self.blocker(**{"class":"discovery"}))["key"]
+        with self.assertRaisesRegex(CardError, "contract already promises"):
+            findings.triage(self.card, key, "M", "followup", "Old but promised")
+
+    def test_low_baseline_finding_still_needs_size_and_scope_triage(self):
+        self.accepted()
+        key = self.imported(self.blocker(**{"class":"discovery", "violates":"regression", "severity":"low"}))["key"]
+        self.assertIn(key, findings.pending(self.card.load()))
+        decision = findings.triage(self.card, key, "M", None, "Low impact and unrelated cleanup")
+        self.assertEqual(decision["decision"], "not-planned")
+        findings.resolve(self.card, self.repo, key, "not-planned", "Cost exceeds benefit for this scope")
+        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
+
+    def test_panel_discovery_can_choose_inline_after_acceptance(self):
+        self.accepted()
+        self.write("calc.py", (self.repo / "calc.py").read_text() + "\n# next round\n")
+        self.verified()
+        review.brief(self.card, self.repo)
+        key = self.report([self.blocker(**{"class":"discovery", "violates":"regression"})])["findings"][0]["key"]
+        review.settle(self.card, self.repo)
+        findings.triage(self.card, key, "S", None, "Small local correction")
+        self.assertEqual(findings.late_return(self.card, self.repo, "Selected inline")["number"], 1)
+        self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
+
+    def test_mixed_panel_note_retains_baseline_triage_obligation(self):
+        self.accepted()
+        self.write("calc.py", (self.repo / "calc.py").read_text() + "\n# new round\n")
+        self.verified()
+        review.brief(self.card, self.repo)
+        key = self.report([self.blocker(**{"class":"note", "violates":"regression"})])["findings"][0]["key"]
+        self.report([self.blocker(**{"class":"discovery", "violates":"regression"})], "second")
+        self.assertTrue(findings.baseline(self.card.load()["ledger"][key]))
+        findings.triage(self.card, key, "S", None, "Small local correction")
+        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
+
+
+if __name__ == "__main__":
+    unittest.main()

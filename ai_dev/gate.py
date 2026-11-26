@@ -106,7 +106,7 @@ def _reviewer(tool_name, env, args):
         if outcome == "changes" or (outcome == "accept" and post_defect):
             return None
         if outcome == "accept":
-            late = any(e["status"] == "confirmed" and e.get("sources") for e in state["ledger"].values())
+            late = any((e["status"] == "confirmed" and e.get("sources")) or findings.inline_pending(e) for e in state["ledger"].values())
             if late:
                 if any(r["tree"] == tree and r.get("run") == (env.get("HERMES_KANBAN_RUN_ID") or env.get("HERMES_SESSION_ID")) for r in state.get("late_returns", [])):
                     return None

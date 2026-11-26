@@ -144,6 +144,8 @@ def finding(args):
         return review.waive(card, args.key, args.owner_ref, args.reason), 0
     if args.action == "assess":
         return review.assess(card, _workspace(args), args.key, args.severity, args.impact, args.evidence), 0
+    if args.action == "triage":
+        return findings.triage(card, args.key, args.size, args.decision, args.reason), 0
     if args.action == "import":
         return findings.import_finding(card, _workspace(args), args.file), 0
     if args.action == "resolve":
@@ -151,7 +153,7 @@ def finding(args):
     if args.action == "return":
         return findings.late_return(card, _workspace(args), args.reason), 0
     ledger = card.load()["ledger"]
-    return {"findings": [{**severity.describe(e), **{k: e.get(k) for k in ("violates", "location", "first_round", "sources", "disposition", "confirm")}}
+    return {"findings": [{**severity.describe(e), **{k: e.get(k) for k in ("violates", "location", "first_round", "sources", "disposition", "confirm", "inherited_from", "triage")}}
                          for e in ledger.values()]}, 0
 
 
@@ -232,7 +234,7 @@ def main(argv=None):
     sub.set_defaults(run=run_confirm)
 
     sub = commands.add_parser("finding", help="The findings ledger.")
-    sub.add_argument("action", choices=("list", "waive", "assess", "import", "resolve", "return"))
+    sub.add_argument("action", choices=("list", "waive", "assess", "import", "resolve", "return", "triage"))
     sub.add_argument("key", nargs="?")
     sub.add_argument("--owner-ref")
     sub.add_argument("--reason")
@@ -242,6 +244,8 @@ def main(argv=None):
     sub.add_argument("--file")
     sub.add_argument("--outcome", choices=("resolved", "deferred", "not-planned"))
     sub.add_argument("--ticket")
+    sub.add_argument("--size", choices=("S", "M", "L", "XL"))
+    sub.add_argument("--decision", choices=("inline", "followup", "not-planned"))
     sub.set_defaults(run=finding)
 
     args = parser.parse_args(argv)
