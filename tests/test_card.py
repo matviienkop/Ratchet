@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ai_dev import gate, gitio, notifications, release, review, severity, verify
+from ai_dev import gate, gitio, notifications, policy, recovery, release, review, severity, verify
 from ai_dev.store import Card, CardError
 
 PY = sys.executable
@@ -625,7 +625,7 @@ class Panel(CardCase):
         with self.assertRaisesRegex(CardError, "panel is required"):
             review.settle(self.card, self.repo)
 
-    def strict_panel(self, author="writer", fail=False, findings=None):
+    def strict_panel(self, author="writer", fail=False, findings=None, usage=None):
         # Two actual processes rendezvous across checkouts; serial dispatch times out here.
         members = []
         for name, other, output in [("astra", "opus", "hermes-usage"), ("opus", "astra", "claude-json")]:
@@ -645,8 +645,9 @@ class Panel(CardCase):
                     dest = Path(sys.argv[sys.argv.index("--usage-file") + 1])
                     brief = dest.parent / "review-task.txt"
                     assert str(brief) in sys.argv[-1] and brief.is_file() and Path.cwd() not in brief.parents
+                    assert '{{"path": ' in brief.read_text() and '"observation": ' in brief.read_text()
                     dest.write_text(json.dumps({{"model":"astra","provider":"openai-codex","failed":False,
-                        "completed":True,"session_id":"a1","api_calls":1}}))
+                        "completed":True,"session_id":"a1","api_calls":1, **{usage or {}!r}}}))
                     print(json.dumps(report))
                 else:
                     if {fail!r}: sys.exit(1)
@@ -673,6 +674,27 @@ class Panel(CardCase):
         rnd = self.card.load()["rounds"][0]
         self.assertEqual(set(rnd["reports"]), {"astra", "opus"})
         self.assertEqual(rnd["panel"]["astra"]["runtime"]["session_id"], "a1")
+
+    def test_one_report_settles_when_the_other_provider_is_down(self):
+        # Hermes answers through its fallback provider when the pinned one is rate-limited.
+        self.strict_panel(usage={"provider": "other-subscription", "model": "sonnet"})
+        review.brief(self.card, self.repo)
+        result = review.panel(self.card, self.repo)
+        self.assertEqual([p["status"] for p in result["panel"]], ["unavailable", "ok"], result)
+        self.assertEqual(result["panel"][0]["error_class"], "provider_unavailable")
+        self.assertEqual(result["provider_diversity"], "single-reviewer")
+        self.assertIsNone(recovery.trigger(self.card.load(), policy.load(repo=self.repo), "provider"))
+        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
+        messages = [e["text"] for e in self.card.load()["log"] if e["event"] == "review.summary-message"]
+        self.assertIn("Ревью одним ревьюером", "".join(messages))
+
+    def test_an_unattested_model_on_the_pinned_provider_still_blocks(self):
+        self.strict_panel(usage={"model": "someone-else"})
+        review.brief(self.card, self.repo)
+        result = review.panel(self.card, self.repo)
+        self.assertEqual(result["panel"][0]["error_class"], "attestation")
+        with self.assertRaisesRegex(CardError, "panel is required"):
+            review.settle(self.card, self.repo)
 
     def test_two_ratings_reconciled_once_with_evidence_and_retained_in_handoff(self):
         self.strict_panel(findings={"astra":[self.blocker(severity="high")], "opus":[self.blocker(severity="low")]})
@@ -766,6 +788,24 @@ class Panel(CardCase):
         rnd["panel_attempts"] = {slot["name"]: [{"model": peer["model"]}]}
         self.assertEqual(review_routes.reserve(state, config, rnd, slot, set())["model"], "gpt-6.2-sol")
         state["log"].append({"event": "model.attempt", "lane": "coder", "model": "gpt-6-sol"})
+        self.assertIsNone(review_routes.reserve(state, config, rnd, slot, set()))
+
+    def test_sdk_rejected_model_is_a_provider_outage(self):
+        from ai_dev import policy, review_routes
+        member = {"output": "claude-json", "model": "claude-fable-5-2"}
+        line = '[claude-code:unrecognized_model] {"model":"claude-fable-5-2","query_source":"sdk"}'
+        done = subprocess.CompletedProcess([], 1, b"", line.encode())
+        self.assertEqual(review_routes.runner_failure(done, member, Path("missing"))[0], "provider_unavailable")
+        other = subprocess.CompletedProcess([], 1, b"", line.replace("fable-5-2", "opus-5-5").encode())
+        self.assertEqual(review_routes.runner_failure(other, member, Path("missing"))[0], "process_failure")
+        config = policy.DEFAULTS["review"]
+        slot = config["panel"][0]
+        state = {"log": [{"event": "model.attempt", "lane": "coder", "model": "gpt-6.2-astra"}]}
+        saved = {"error_class": "process_failure", "status": "unavailable", "provider": "anthropic",
+                 "model": "claude-fable-5-2", "reason": "exit 1: " + line}
+        rnd = {"panel": {slot["name"]: saved}, "panel_attempts": {slot["name"]: [{"model": "claude-fable-5-2"}]}}
+        self.assertEqual(review_routes.reserve(state, config, rnd, slot, set())["model"], "gpt-6.2-sol")
+        saved["reason"] = "exit 1: segmentation fault"
         self.assertIsNone(review_routes.reserve(state, config, rnd, slot, set()))
 
     def test_malformed_successful_model_output_cannot_trigger_fallback(self):

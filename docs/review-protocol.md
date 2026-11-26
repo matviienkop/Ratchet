@@ -60,6 +60,49 @@ Running `review brief` or `review settle` again on a tree whose round is already
 
 When the round settles `accept` and a `post_review` check then fails on the change, the reviewer returns the card with `kanban_request_changes` and the failing check. The next candidate opens the next round.
 
+## Late findings after an accepted round
+
+A finding can arrive after the round settled `accept`: a hosted review comment on the pull request, a CI result, an owner remark. The gate then refuses `kanban_request_changes` from the reviewer, and `review brief` returns the settled round for the same tree. The ledger has no command to add such a finding, so the planner carries it:
+
+1. The review coordinator reproduces the finding on the candidate and on the base, stores the evidence in the card's evidence directory and blocks the card with `kanban_block(kind="needs_input")`, naming the finding, the evidence and the verdict. A finding that does not reproduce is a note.
+2. A finding confirmed as a regression or a contract violation goes back to the author. The planner logs a board comment with the ordinal of the return, the finding's identifier, the evidence and the required fix, then returns the card with the native board command (`hermes kanban reopen-review`, Hermes 0.21.5 `hermes_cli/kanban.py`). The author adds the reproduction test to the patch. The new tree passes verification, a new review round, the post-review checks and the delivery gates as usual.
+3. One card takes at most two late returns. The count is the number of logged late returns, not of review rounds.
+4. After two returns the card is not returned again and the owner is not asked for a third. The planner files one tracker ticket per remaining confirmed regression, with the reproduction and links to the original ticket and pull request, then completes the card through its normal merge and release gates.
+5. After the release is verified the planner takes the follow-ups without asking the owner, one ticket at a time, each through the full cycle: the regression tickets first, then advisory notes and baseline discoveries. No follow-up starts while the original card is open. The planner creates the follow-up cards at once and links each as the child of the previous one, so the dispatcher, not the planner's memory, starts the next card.
+
+Panel reports, the contract and the gates stay unchanged throughout.
+
+## Follow-ups: classification, disposition and order
+
+Every finding that does not block the card, and every problem a repair worker meets on the way, is classified before anything is filed.
+
+**Severity** applies to defects. It uses the four levels of the finding ledger; the tracker labels are `severity:S1` to `severity:S4`.
+
+| Ledger | Label | Meaning |
+| --- | --- | --- |
+| critical | S1 | Data loss, a security breach, or the product cannot be used |
+| high | S2 | A main function is broken and no acceptable workaround exists |
+| medium | S3 | A secondary function is wrong, or a workaround exists |
+| low | S4 | Minor or cosmetic; includes tests-only and maintainability findings |
+
+**Priority** orders all tickets, defects and features alike. `priority:P0` blocks a release or needs action now, `P1` is next in line, `P2` is normal, `P3` is done when cheap. For a defect the planner derives it from severity (S1 gives P0, S2 gives P1, S3 gives P2, S4 gives P3) and may move it one step with a stated reason. The owner can set any priority.
+
+**Size** is a relative estimate of the whole change, in T-shirt sizes. `size:S` is one focused change under about 100 changed lines. `size:M` is one subsystem and 100 to 500 lines. `size:L` is several components or 500 to 1000 lines. `size:XL` is more than that. Write the contract of an L with extra care for its failure scenarios. Split an XL into smaller tickets before starting. After the merge, put the actual changed-line count into the ticket's closing comment so estimates can be compared with results.
+
+**Disposition.** A full cycle costs two reviews, the stand, CI and a release, so not every finding earns a fix. Decide for each one:
+
+| Finding | Disposition |
+| --- | --- |
+| S1 or S2 | Fix it. File the ticket at P0 or P1 |
+| S3 | File a follow-up ticket; it is taken in queue order |
+| S4 | No ticket of its own. Record it as not planned in the round summary, with the reason. Several S4 items in one area, such as test isolation, may share one housekeeping ticket of size S or M |
+| Not reproduced, or reachable only through an unsupported precondition | Drop it and record why |
+| Already covered by an open ticket | Add it to that ticket; file nothing new |
+
+Tell the owner which findings were not turned into tickets and why. The owner can overrule any disposition.
+
+**Order.** The follow-up queue is sorted by priority, highest first, then by size, smallest first, then by ticket number. Rebuild the chain of cards when a priority or a size changes.
+
 At `owner`, dispatch the bounded review diagnosis with `recover review`. If its correction fails and acceptance is still blocked, the owner can waive findings (`finding waive`), grants rounds (`review extend --rounds N`) or stops the card. Settling again after a waiver or an extension gives `accept` or `changes` for the same round.
 
 ## Independent review workers
@@ -96,7 +139,9 @@ A blocker needs `violates`, `location`, `trigger`, `expected` and `actual`. An e
 
 Each logical slot can allow specific cross-provider peers in `fallbacks`. Each peer has an exact `model`, `tier`, `output` runtime format and `argv`. A primary defaults to tier `frontier`. The operator assigns the capability tiers and a fallback must meet the slot's tier. The standard routes substitute Fable 5.2 for Astra and Astra 6.2 for Opus. Model identities already used by the implementation or reserved by the other review slot are excluded, including context-window aliases.
 
-An author assigned to a primary slot is skipped before launch and its approved independent peer is selected. A classified quota, authentication or service-availability error from the runner dispatches an eligible peer in the same round. Invalid report content, missing runtime proof, local timeouts and command errors go to diagnosis. Every attempt retains its logical slot, model, provider, result and available runtime evidence. The bound task conversation receives the previous model, new model and reason for each route change. Two authenticated models on the same provider can complete the panel after an outage. The resulting summary and fix brief disclose the reduced provider diversity. When no independent peer is available, the gate stays closed and `ai-dev-card recover provider` drives recovery.
+An author assigned to a primary slot is skipped before launch and its approved independent peer is selected. A classified quota, authentication or service-availability error from the runner dispatches an eligible peer in the same round. Invalid report content, missing runtime proof, local timeouts and command errors go to diagnosis. Every attempt retains its logical slot, model, provider, result and available runtime evidence. The bound task conversation receives the previous model, new model and reason for each route change. Two authenticated models on the same provider can complete the panel after an outage. The resulting summary and fix brief disclose the reduced provider diversity. When a provider is unavailable, the slot first tries its approved peer of the same tier on another provider. If every approved route of a slot is down for a reason outside the candidate (quota, authentication, provider outage), the slot is excused and one attested report from an independent model settles the round. The summary then says `single-reviewer` and names the unavailable provider and the reason. An identity conflict alone, an unattested model or an invalid report never excuses a slot: with no independent report at all the gate stays closed and `ai-dev-card recover provider` drives recovery.
+
+Hermes can answer a pinned OpenAI reviewer through its fallback provider when the OpenAI login is rate-limited; the command then succeeds and the usage receipt names another provider and model (Hermes 0.21.5 `--usage-file`, `hermes_cli/oneshot.py`). The runner records that as `provider_unavailable`, not as an attestation failure.
 
 ## Author and reviewer families
 

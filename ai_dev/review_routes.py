@@ -13,6 +13,10 @@ class AttestationError(ValueError):
     """The runner could not prove which model reviewed the candidate."""
 
 
+class ProviderUnavailable(Exception):
+    """The pinned provider did not serve the review; the runner answered through another one."""
+
+
 def identity(model):
     name = re.sub(r"-\d+[km]$", "", (model or "").strip().lower())
     name = name.removesuffix("[1m]").rsplit("/", 1)[-1]
@@ -51,18 +55,46 @@ def validate(member):
         seen.add(identity(peer["model"]))
 
 
+def _sdk_model_rejected(line, model):
+    prefix = "[claude-code:unrecognized_model] "
+    if not line.startswith(prefix):
+        return False
+    try:
+        detail = json.loads(line[len(prefix):])
+    except ValueError:
+        return False
+    return (isinstance(detail, dict) and isinstance(model, str)
+            and detail.get("model") == model and detail.get("query_source") == "sdk")
+
+
 def reserve(state, config, rnd, member, reserved):
     entry = rnd["panel"].get(member["name"], {})
-    if entry.get("error_class") not in EXTERNAL | {"identity_conflict"}:
+    error_class = entry.get("error_class")
+    if (error_class == "process_failure" and entry.get("status") == "unavailable"
+            and entry.get("provider") == "anthropic"
+            and any(r["output"] == "claude-json" and r["model"] == entry.get("model")
+                    for r in routes(member))):
+        # Apply the same rule to exact runner receipts already saved before this fix.
+        saved = re.fullmatch(r"exit [1-9][0-9]*: (.+)", entry.get("reason", ""))
+        if saved and _sdk_model_rejected(saved.group(1), entry.get("model")):
+            error_class = "provider_unavailable"
+    if error_class not in EXTERNAL | {"identity_conflict"}:
         return None
     used = reserved | authors(state, config) | {identity(m.get("model")) for m in config["panel"]}
-    previous_provider = entry.get("provider") if entry.get("error_class") in EXTERNAL else None
+    previous_provider = entry.get("provider") if error_class in EXTERNAL else None
     for history in rnd.get("panel_attempts", {}).values():
         used.update(identity(a["model"]) for a in history)
     for lane in rnd["panel"].values():
         used.add(identity(lane.get("runtime", {}).get("model")))
     return next((r for r in routes(member)[1:] if identity(r["model"]) not in used
                  and PROVIDERS.get(r["output"]) != previous_provider), None)
+
+
+def excused(state, config, rnd, member):
+    """A slot whose last route failed outside the candidate and that has no approved peer left to try."""
+    entry = rnd["panel"].get(member["name"], {})
+    return (entry.get("status") == "unavailable" and entry.get("error_class") in EXTERNAL
+            and reserve(state, config, rnd, member, set()) is None)
 
 
 def runner_failure(done, member, usage):
@@ -85,6 +117,10 @@ def runner_failure(done, member, usage):
         pass
     if not failed:
         return None
+    if done.returncode and member.get("output") == "claude-json":
+        for line in done.stderr.decode(errors="replace").splitlines():
+            if _sdk_model_rejected(line, member.get("model")):
+                return "provider_unavailable", f"provider_unavailable (exit {done.returncode}): {line[-350:]}"
     for kind, pattern in (
         ("quota", r"\b429\b|rate.limit|quota|usage.limit|credit balance|limit reached|hit your limit"),
         ("auth", r"\b(?:401|403)\b|unauthenticated|invalid.api.key|not logged in|authentication.error|token.expired|expired.token|invalid.bearer.token"),

@@ -10,7 +10,7 @@ from . import gitio, policy, stands
 from .redact import sanitize
 from .store import CardError, record
 
-ACTIONS = ("start", "status", "test", "repair", "reset", "reinstall", "restore-previous", "shutdown")
+ACTIONS = ("start", "status", "test", "install", "repair", "reset", "reinstall", "restore-previous", "shutdown")
 
 
 def operations(driver):
@@ -53,8 +53,13 @@ def run(args, card, workspace):
             arguments = arguments[1:]
         if not arguments:
             raise CardError("Run stand test NAME -- COMMAND [ARG...].")
+    elif args.action == "install":
+        if arguments[:1] == ["--"]:
+            arguments = arguments[1:]
+        if len(arguments) != 2:
+            raise CardError("Run stand install NAME -- PACKAGE_URL SHA256.")
     elif arguments:
-        raise CardError("Only stand test accepts command arguments.")
+        raise CardError("Only stand test and stand install accept arguments.")
     script = None
     if args.action == "repair":
         if sys.stdin.isatty():

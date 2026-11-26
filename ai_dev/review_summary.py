@@ -30,7 +30,11 @@ def queue(state, rnd, outcome):
              f"Замечаний в отчётах этого раунда: {len(entries)}."]
     if payload["provider_diversity"] == "degraded":
         lines.append("Оба независимых ревьювера от одного провайдера: " + ", ".join(str(m) for m in payload["models"].values()) + ".")
-    if missing:
+    if payload["provider_diversity"] == "single-reviewer" and outcome != "incomplete":
+        lines.append("Ревью одним ревьюером: провайдер второго недоступен. " + "; ".join(
+            f"{name}: {slot.get('reason', '')}" for name, slot in sorted(rnd["panel"].items())
+            if slot.get("status") != "ok")[:400])
+    elif missing:
         lines.append("Нет отчёта от " + ", ".join(missing) + ".")
     for index, entry in enumerate(entries, 1):
         lines.append(f"{index}. [{entry['severity']}] {entry['title']} · {entry['status']} ({entry['key']})")
@@ -57,6 +61,10 @@ def queue(state, rnd, outcome):
 def diversity(rnd):
     providers = [slot.get("runtime", {}).get("provider") for slot in rnd.get("panel", {}).values()
                  if slot.get("status") == "ok"]
+    down = [slot for slot in rnd.get("panel", {}).values() if slot.get("status") == "unavailable"
+            and slot.get("error_class") in ("quota", "auth", "provider_unavailable")]
+    if len(providers) == 1 and providers[0] and down:
+        return "single-reviewer"
     if len(providers) != 2 or not all(providers):
         return "incomplete"
     return "degraded" if len(set(providers)) == 1 else "cross-provider"

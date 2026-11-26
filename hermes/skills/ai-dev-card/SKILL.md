@@ -37,7 +37,7 @@ Keep the candidate worktree unchanged. You own dispatch, reproduction and settle
 1. Run `ai-dev-card review brief` on the verified tree. A full round covers the whole patch. Later rounds cover the interdiff, open blockers and affected callers/tests.
 2. Run `ai-dev-card review panel` once. It starts the two subagents concurrently in separate candidate checkouts. Let the command finish. On restart, repeat it to collect any missing report; completed reviewers keep their receipts. The runner tries approved independent cross-provider peers on an external outage, records every attempt and reports reduced diversity. Follow the returned recovery action if a slot remains unavailable.
 3. Read the reports, coverage and runtime identities for this round. The OpenAI reviewer traces contracts and callers. The Anthropic reviewer traces failure paths and recovery. Compare the findings, confirm blockers with evidence, and send nonblocking discoveries to follow-ups.
-4. A missing required provider or an unverified identity leaves automatic acceptance closed. Pass the candidate, available reports, missing reviewer and reason to a human. For an explicitly configured legacy manual workflow, follow the brief's submit step.
+4. When a reviewer's provider is unavailable, the panel tries its approved peer on another provider by itself. If no route of that slot works, the slot is excused and `review settle` accepts one attested independent report; the summary says `single-reviewer` and names the provider and the reason. Do not wait for the provider and do not ask the owner in that case. An unverified identity, or no independent report at all, still leaves automatic acceptance closed: pass the candidate, the available reports, the missing reviewer and the reason to a human. For an explicitly configured legacy manual workflow, follow the brief's submit step.
 5. Resolve each key in `to_assess` yourself with `ai-dev-card finding assess KEY --severity LEVEL --impact TEXT --evidence FILE`. Inspect a tracked source file or verification artifact to explain actual user impact. Keep each reviewer's confidence and severity visible. A low impact stays advisory; a demonstrably material violation of a named requirement still needs a reproduction before it can block. List the current candidates again with `ai-dev-card finding list`.
    For each key under `to_confirm`, try once to reproduce the blocker with a test that fails when the defect is present:
    `ai-dev-card confirm --finding KEY --file <test file>:<repo path> -- <command that runs it>`
@@ -48,9 +48,19 @@ Keep the candidate worktree unchanged. You own dispatch, reproduction and settle
    - `changes`: `kanban_request_changes(reason=<contents of the fix brief>)`.
    - `owner`: the nominal round limit is reached. Run `ai-dev-card recover review` and follow the recovery decision.
 
+Before any note or discovery leaves the round as a follow-up, give it a severity and decide its disposition by the review protocol: S1 to S3 become tickets, an S4 is recorded as not planned unless it joins a housekeeping ticket, an unreproduced claim is dropped. Pass the classified list to the planner; do not create one card per finding.
+
+A finding that arrives after the round settled `accept` (a hosted review comment, a CI result, an owner remark) cannot enter that round. Reproduce it on the candidate and on the base, keep the evidence in the card's evidence directory, then call `kanban_block(kind="needs_input", reason=<finding, evidence, verdict>)`. The planner returns the card to the author or files the follow-up.
+
 Settlement queues the full round summary, including an empty list, for the bound conversation. Let the notifier deliver it.
 
 Report few, high-confidence findings. An empty list is a valid result. A blocker names the criterion or scenario it violates, or is a regression against the base. Everything else is a note. A defect that already exists on the base is a discovery: it goes to a follow-up, it does not block this card.
+
+## Language and style
+
+Everything that stays outside the chat is written in English: tracker tickets and their comments, pull request titles and descriptions, review replies, commit messages, documentation, card titles, bodies and comments. Chat messages to the owner use the owner's language; that includes stage handoffs and the transition summaries the board delivers to the chat. Run both kinds of text through the `unslop` skill before you post or send them.
+
+A bare number tells the owner nothing. In a chat message, the first time a ticket, pull request or card appears, give its short title next to the identifier, translated into the owner's language when the title is in another one: `#140 "keep publisher trust through purge and rollback"`, not `#140`. Later mentions in the same message may use the identifier alone. A list of several tickets is a table or a list with one title per line.
 
 ## Handoffs and progress
 

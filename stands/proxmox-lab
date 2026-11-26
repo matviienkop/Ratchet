@@ -1,8 +1,9 @@
 #!/usr/bin/python3 -I
-"""Broker four power/test verbs against operator-pinned QEMU guests."""
+"""Broker power, test and package-install verbs against operator-pinned QEMU guests."""
 import base64
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -77,6 +78,53 @@ class Lab:
             "--property=RuntimeMaxSec=900", "--property=TasksMax=256", "--", "/usr/bin/python3", "-I", "-c",
             launch, encoded,
         ]
+        return self.execute(command)
+
+    def install(self, url, digest):
+        """Install one release package as root. The registered prefix bounds where it may come from."""
+        rules = self.cfg.get("install", {})
+        prefix = rules.get("url_prefix", "")
+        # Some packages refuse replacement outside their own maintenance command; the operator names it here.
+        replace = rules.get("replace_with", [])
+        if not isinstance(replace, list) or not all(isinstance(part, str) and part for part in replace):
+            raise ValueError("install.replace_with must be a list of command words.")
+        if (not prefix.startswith("https://") or not url.startswith(prefix) or ".." in url
+                or not re.fullmatch(r"https://[A-Za-z0-9._~/%+-]+\.deb", url)):
+            raise ValueError("Package URL is outside the registered release location.")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("Pass the package SHA-256 as 64 lowercase hex digits.")
+        if self.status() != "running":
+            raise ValueError("Guest is stopped. Start it before installing.")
+        fetch = ("import hashlib,json,os,subprocess,sys,tempfile,urllib.request\n"
+                 "url,digest,replace=sys.argv[1],sys.argv[2],json.loads(sys.argv[3])\n"
+                 "env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','DEBIAN_FRONTEND':'noninteractive','LANG':'C'}\n"
+                 "with tempfile.TemporaryDirectory(prefix='ai-dev-install.',dir='/var/tmp') as folder:\n"
+                 "    os.chmod(folder,0o755)\n"
+                 "    path=os.path.join(folder,'package.deb')\n"
+                 "    seen=hashlib.sha256()\n"
+                 "    with urllib.request.urlopen(url,timeout=60) as source, open(path,'wb') as target:\n"
+                 "        if not source.geturl().startswith('https://'):\n"
+                 "            sys.exit('Package download left HTTPS.')\n"
+                 "        while chunk:=source.read(1<<20):\n"
+                 "            seen.update(chunk)\n"
+                 "            target.write(chunk)\n"
+                 "            if target.tell()>1<<30:\n"
+                 "                sys.exit('Package exceeds one gibibyte.')\n"
+                 "    if seen.hexdigest()!=digest:\n"
+                 "        sys.exit('Package digest differs from the expected SHA-256.')\n"
+                 "    name=subprocess.run(['dpkg-deb','--field',path,'Package'],check=True,capture_output=True,"
+                 "text=True,env=env).stdout.strip()\n"
+                 "    present=subprocess.run(['dpkg-query','--show','--showformat','${db:Status-Status}',name],"
+                 "capture_output=True,text=True,env=env).stdout.strip()=='installed'\n"
+                 "    subprocess.run(['dpkg','--configure','-a'],check=True,env=env,stdin=subprocess.DEVNULL)\n"
+                 "    command=['apt-get','install','--yes','--quiet','--no-install-recommends',path]\n"
+                 "    subprocess.run((replace if present else [])+command,check=True,env=env,"
+                 "stdin=subprocess.DEVNULL)\n"
+                 "    subprocess.run(['dpkg-query','--show','--showformat',"
+                 "'installed ${Package} ${Version} ${db:Status-Status}\\n',name],check=True,env=env)\n")
+        return self.execute(["/usr/bin/python3", "-I", "-c", fetch, url, digest, json.dumps(replace)])
+
+    def execute(self, command):
         deadline = time.monotonic() + 180
         while True:
             try:
@@ -96,30 +144,36 @@ class Lab:
                         print("Guest " + key + "put was truncated.", file=sys.stderr)
                 return result.get("exitcode", 128 + result.get("signal", 1))
             if time.monotonic() >= deadline:
-                raise ValueError("Guest test exceeded its execution deadline.")
+                raise ValueError("Guest command exceeded its execution deadline.")
             time.sleep(1)
 
 
+VERBS = ("start", "shutdown", "status", "test", "install")
+
+
 def main(args):
-    usage = f"Usage: {Path(sys.argv[0]).name} VMID status|start|shutdown|test [--] COMMAND [ARG...]"
+    usage = (f"Usage: {Path(sys.argv[0]).name} VMID status|start|shutdown | test [--] COMMAND [ARG...] | "
+             "install [--] PACKAGE_URL SHA256")
     if len(args) < 2:
         raise ValueError(usage)
     vmid, action, *argv = args
-    if action == "test" and argv[:1] == ["--"]:
+    if action in ("test", "install") and argv[:1] == ["--"]:
         argv = argv[1:]
-    if action not in ("start", "shutdown", "status", "test") or (action == "test") != bool(argv):
+    expected = len(argv) == 2 if action == "install" else (action == "test") == bool(argv)
+    if action not in VERBS or not expected:
         raise ValueError(usage)
     cfg = json.loads(Path(__file__ + ".json").read_text())
     if vmid not in cfg["guests"]:
         raise ValueError("Guest ID is outside the configured lab.")
     lab = Lab(cfg, vmid)
     allowed = lab.identity.get("operations", ["start", "shutdown", "status", "test"])
-    if (not isinstance(allowed, list) or action not in allowed
-            or any(verb not in ("start", "shutdown", "status", "test") for verb in allowed)):
+    if not isinstance(allowed, list) or action not in allowed or any(verb not in VERBS for verb in allowed):
         raise ValueError("Operation is outside this guest's grant.")
     lab.verify()
     if action == "test":
         return lab.test(argv)
+    if action == "install":
+        return lab.install(*argv)
     lab.power(action)
     return 0
 

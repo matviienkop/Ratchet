@@ -77,10 +77,18 @@ class StandControl(CardCase):
         with patch("subprocess.run", return_value=Mock(returncode=3)) as call:
             self.assertEqual(main(["test","--","printf","a; b"], cfg), 3)
             self.assertEqual(call.call_args.args[0], [cfg["broker"], "200", "test", "--", "printf", "a; b"])
-            for op in ("repair","prepare","reboot","delete"):
+            for op in ("repair","prepare","reboot","delete","install"):
                 with self.assertRaises(ValueError):
                     main([op], cfg)
             self.assertEqual(call.call_count, 1)
+            granted = {**cfg, "operations": ["status", "install"]}
+            package = ["https://example.org/demo.deb", "ab" * 32]
+            self.assertEqual(main(["install", "--", *package], granted), 3)
+            self.assertEqual(call.call_args.args[0], [cfg["broker"], "200", "install", "--", *package])
+            for bad in (["install"], ["install", "--", package[0]], ["install", *package]):
+                with self.assertRaises(ValueError):
+                    main(bad, granted)
+            self.assertEqual(call.call_count, 2)
 
     def test_management_operations_record_outcomes_without_granting_a_verification_receipt(self):
         driver = self.write("fake", "#!/bin/sh\nprintf 'done\\n'\n")

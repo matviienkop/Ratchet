@@ -8,7 +8,7 @@ import sys
 
 def main(args, cfg):
     allowed = cfg.get("operations", [])
-    verbs = {"status", "start", "shutdown", "test"}
+    verbs = {"status", "start", "shutdown", "test", "install"}
     if cfg.get("maintenance"):
         verbs.update(("reset", "reinstall", "restore-previous"))
     if not isinstance(allowed, list) or not allowed or any(v not in verbs for v in allowed):
@@ -19,8 +19,11 @@ def main(args, cfg):
     if not args or args[0] not in allowed:
         raise ValueError("Operation is outside this guest's grant.")
     action, *rest = args
-    if (action == "test" and (len(rest) < 2 or rest[0] != "--")) or (action != "test" and rest):
-        raise ValueError("Use test -- COMMAND [ARG...] or a single power/status operation.")
+    if ((action == "test" and (len(rest) < 2 or rest[0] != "--"))
+            or (action == "install" and (len(rest) != 3 or rest[0] != "--"))
+            or (action not in ("test", "install") and rest)):
+        raise ValueError("Use test -- COMMAND [ARG...], install -- PACKAGE_URL SHA256, or a single power/status "
+                         "operation.")
     if action in ("reset", "reinstall", "restore-previous"):
         transport = Path(cfg["maintenance"])
         if rest or not transport.is_absolute() or transport != transport.resolve():

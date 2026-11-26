@@ -52,7 +52,27 @@ hermes kanban boards create panasms --name "PaNasMs" --default-workdir /path/to/
 
 `--default-workdir` is the repository that worktree cards branch from. A card for another repository passes its path at creation.
 
-## 5. Restart
+Turn off the Hermes auto-decomposer for the profile that runs the gateway:
+
+```sh
+hermes config set kanban.auto_decompose false
+```
+
+With the default `true`, the dispatcher splits every card that lands in `triage` into new cards with an auxiliary model (Hermes 0.21.5 `gateway/kanban_watchers_common.py`, `hermes_cli/kanban_decompose.py`). A coding card that enters `triage` after a block loop is then re-planned outside its contract, and its children run without the gate. The setting is read on every dispatcher tick, so no restart is needed.
+
+## 5. Board in the browser
+
+The Hermes dashboard shows the boards in its Kanban tab (Hermes 0.21.5 `plugins/kanban/dashboard`). To keep it running on the bot's host:
+
+```sh
+sudo install -m 644 hermes/hermes-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable hermes-dashboard.service
+```
+
+The unit binds `0.0.0.0:9119`. Hermes refuses a non-loopback bind without an auth provider, so set a login first: `dashboard.basic_auth.username` and `dashboard.basic_auth.password_hash` in the gateway profile's `config.yaml` (`plugins/dashboard_auth/basic`, hash with its `hash_password`), then `sudo systemctl start hermes-dashboard`. The dashboard can also move cards and edit configuration; run the work through the planner chat and use the board for reading.
+
+## 6. Restart
 
 Restart the Hermes gateway. The dispatcher runs inside it, and workers load plugins and skills when they start.
 
