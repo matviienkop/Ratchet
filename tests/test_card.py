@@ -351,11 +351,161 @@ class ReviewRounds(CardCase):
         self.assertIn("Ran 1 test", Path(recheck["log"]).read_text())
         self.assertEqual(self.card.load()["ledger"][key]["status"], "fixed")
 
-    def test_recheck_refuses_different_committed_python_reproduction(self):
+    def test_changed_reproduction_goes_back_to_the_reviewer(self):
         key, recheck = self._recheck_committed_python_reproduction(identical=False)
-        self.assertEqual((recheck["fixed"], recheck["exit_code"]), (False, None))
-        self.assertIn("collides with the checkout", Path(recheck["log"]).read_text())
+        self.assertEqual((recheck["fixed"], recheck["exit_code"], recheck["reconfirm"]), (False, None, True))
+        self.assertEqual(recheck["collision"], "test_repro.py")
+        self.assertEqual(self.card.load()["ledger"][key]["status"], "candidate")
+        brief = json.loads((self.card.evidence("round-2") / "brief.json").read_text())
+        self.assertEqual(brief["reconfirm"], [{"key": key, "changed_file": "test_repro.py"}])
+        self.report([])
+        with self.assertRaisesRegex(CardError, "Confirm each blocker candidate"):
+            review.settle(self.card, self.repo)
+        with self.assertRaisesRegex(CardError, "confirmed by a reproduction before"):
+            review.confirm(self.card, self.repo, key, cannot="it looks fixed")
+        # The reviewer runs the candidate's own test: no stored file is written over it.
+        result = review.confirm(self.card, self.repo, key, argv=[PY, "-m", "unittest", "-q", "test_repro"])
+        self.assertEqual(result["status"], "fixed")
+        entry = self.card.load()["ledger"][key]
+        self.assertEqual((entry["status"], entry["disposition"]["outcome"]), ("fixed", "fixed"))
+        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
+
+    def test_changed_reproduction_that_still_fails_blocks_again(self):
+        key, _ = self._recheck_committed_python_reproduction(identical=False)
+        failing = self.root / "still.py"
+        failing.write_text("import unittest\nclass R(unittest.TestCase):\n    def test_no(self):\n        self.fail('still broken')\n")
+        result = review.confirm(self.card, self.repo, key, files=[(str(failing), "test_still.py")],
+                                argv=[PY, "-m", "unittest", "-q", "test_still"])
+        self.assertEqual(result["status"], "confirmed")
+
+    def test_inconclusive_attempt_can_end_as_unconfirmed(self):
+        review.brief(self.card, self.repo)
+        key = self.report([self.blocker()])["to_confirm"][0]
+        self.assertEqual(review.confirm(self.card, self.repo, key, argv=["/nonexistent/reproduction-tool"])["status"], "candidate")
+        with self.assertRaisesRegex(CardError, "Confirm each blocker candidate"):
+            review.settle(self.card, self.repo)
+        self.assertEqual(review.confirm(self.card, self.repo, key, cannot="No tool here can run it")["status"], "unconfirmed")
+        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
+
+    def test_project_adapter_controls_confirmation_and_keeps_actual_command(self):
+        adapter = self.root / "adapter.py"
+        adapter.write_text("import sys\nfrom pathlib import Path\nprint(sys.argv[1:])\n"
+                           "assert Path('calc.py').is_file()\nraise SystemExit(2)\n")
+        self.set_policy(review={"reproduction_adapter": [PY, str(adapter)]})
+        review.brief(self.card, self.repo)
+        key = self.report([self.blocker()])["to_confirm"][0]
+        result = review.confirm(self.card, self.repo, key, argv=["project-runner", "with spaces"])
+        self.assertEqual(result["status"], "candidate")
+        evidence = result["proof"]["candidate"]
+        self.assertEqual(evidence["klass"], "environment")
+        self.assertEqual(evidence["command"], [PY, str(adapter), "project-runner", "with spaces"])
+        self.assertIn("with spaces", Path(evidence["log"]).read_text())
+        adapter.write_text("raise SystemExit(1)\n")
+        self.assertEqual(review.confirm(self.card, self.repo, key, argv=["project-runner"])["status"], "confirmed")
+        self.assertEqual(len(self.card.load()["ledger"][key]["confirmations"]), 1)
+
+    def test_adapter_nonprotocol_exit_or_missing_tool_does_not_prove_a_defect(self):
+        review.brief(self.card, self.repo)
+        key = self.report([self.blocker()])["to_confirm"][0]
+        for adapter in (["/missing/adapter"], [PY, "-c", "raise SystemExit(7)"]):
+            with self.subTest(adapter=adapter):
+                self.set_policy(review={"reproduction_adapter": adapter})
+                result = review.confirm(self.card, self.repo, key, argv=[PY, "-c", "pass"])
+                self.assertEqual(result["status"], "candidate")
+                self.assertEqual(result["proof"]["candidate"]["klass"], "environment")
+
+    def test_recheck_uses_current_project_adapter(self):
+        review.brief(self.card, self.repo)
+        key = self.report([self.blocker()])["to_confirm"][0]
+        self.confirm(key)
+        review.settle(self.card, self.repo)
+        self.diagnose("review")
+        self.implement("def div(a, b):\n    if b == 0: raise ValueError('zero')\n    return a / b\n")
+        self.verified()
+        self.set_policy(review={"reproduction_adapter": [PY, "-c", "raise SystemExit(2)"]})
+        packet = review.brief(self.card, self.repo)
+        self.assertEqual(packet["rechecks"][0]["klass"], "environment")
         self.assertEqual(self.card.load()["ledger"][key]["status"], "confirmed")
+        self.report([])
+        self.assertIn(key, review.settle(self.card, self.repo)["blocking"])
+
+    def test_adapter_policy_rejects_malformed_prefix(self):
+        for adapter in ("runner", ["relative-runner"], [PY, ""], [None]):
+            with self.subTest(adapter=adapter):
+                self.set_policy(review={"reproduction_adapter": adapter})
+                with self.assertRaisesRegex(CardError, "reproduction_adapter"):
+                    policy.load(repo=self.repo)
+
+    def _recorded_supersession(self):
+        review.brief(self.card, self.repo)
+        key = self.report([self.blocker()])["to_confirm"][0]
+        self.confirm(key)
+        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
+        folder = self.card.evidence("supersessions", key)
+        log = folder / "replacement.log"
+        log.write_text("ok\n")
+        with self.card.locked() as state:
+            entry, rnd = state["ledger"][key], state["rounds"][-1]
+            replacement = {"klass": "pass", "exit_code": 0, "log": str(log), "sha256": verify.file_digest(log)}
+            state["evidence_supersessions"] = [{
+                "key": key, "round": rnd["n"], "tree": rnd["tree"], "commit": rnd["commit"], "owner_ref": "owner message",
+                "reason": "stale copy", "actor": "maintainer", "argv": [PY, "-c", "pass"], "replacement": replacement,
+                "old": {"fixture": {"destination": "test_repro.py"}, "confirmation_sha256": verify.digest(entry["confirm"])},
+                "receipt_floor": max(v["id"] for v in state["verifications"])}]
+            entry["status"] = "fixed"
+            entry["disposition"] = {"outcome": "fixed", "tree": rnd["tree"], "evidence": replacement}
+        return key, log
+
+    def test_recorded_evidence_supersession_still_requires_a_fresh_round(self):
+        key, log = self._recorded_supersession()
+        self.assertIn("not actionable after evidence supersession", self.decide("kanban_request_changes", "reviewer"))
+        with self.assertRaisesRegex(CardError, "passing verification of this exact tree"):
+            review.brief(self.card, self.repo)
+        receipt, code = verify.verify(self.card, self.repo, rerun=True)
+        self.assertEqual(code, 0, receipt)
+        fresh = review.brief(self.card, self.repo)
+        self.assertEqual((fresh["round"], fresh["supersedes_round"], fresh["mode"], fresh["rechecks"]), (2, 1, "full", []))
+        self.report([])
+        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
+        log.write_text("edited\n")
+        self.assertIn("replacement log no longer matches", self.decide("kanban_complete", "reviewer"))
+
+    def test_recorded_repair_keeps_exact_tree_at_handoff(self):
+        self._recorded_supersession()
+        self.implement("def div(a, b):\n    return 42\n")
+        self.verified()
+        self.assertIn("exact tree", self.decide("kanban_request_review", "coder"))
+        with self.assertRaisesRegex(CardError, "exact tree"):
+            review.brief(self.card, self.repo)
+
+    def test_recorded_repair_panel_refresh_keeps_log_integrity(self):
+        key, log = self._recorded_supersession()
+        verify.verify(self.card, self.repo, rerun=True)
+        review.brief(self.card, self.repo)
+        self.report([])
+        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
+        self.set_policy(review={"panel_required": True, "panel": policy.DEFAULTS["review"]["panel"]})
+        packet = review.brief(self.card, self.repo)
+        self.assertEqual(packet["supersedes_round"], 1)
+        self.assertEqual(packet["mode"], "full")
+        log.write_text("tampered\n")
+        with self.assertRaisesRegex(CardError, "replacement log"):
+            review.brief(self.card, self.repo)
+
+    def test_recorded_repair_recheck_uses_adapter_and_stays_blocking(self):
+        key, log = self._recorded_supersession()
+        verify.verify(self.card, self.repo, rerun=True)
+        review.brief(self.card, self.repo)
+        self.report([])
+        review.settle(self.card, self.repo)
+        self.implement("def div(a, b):\n    return 42\n")
+        self.verified()
+        self.set_policy(review={"reproduction_adapter": [PY, "-c", "raise SystemExit(2)"]})
+        packet = review.brief(self.card, self.repo)
+        self.assertEqual(packet["rechecks"][0]["klass"], "environment")
+        self.assertEqual(self.card.load()["ledger"][key]["status"], "confirmed")
+        self.report([])
+        self.assertIn(key, review.settle(self.card, self.repo)["blocking"])
 
     def test_claims_outside_the_contract_and_unreproduced_ones_do_not_block(self):
         review.brief(self.card, self.repo)
@@ -593,473 +743,6 @@ class ReviewRounds(CardCase):
         second = self.report([self.blocker(title="zero divisor crashes")], "second")["findings"][0]["key"]
         self.assertEqual(first, second)
         self.assertEqual(self.card.load()["ledger"][first]["reporters"], ["reviewer", "second"])
-
-
-@unittest.skipUnless(shutil.which("go"), "Go toolchain required for reproduction tests")
-class EvidenceSupersession(CardCase):
-    PASS = 'package fixture\nimport "testing"\nfunc TestCheck(t *testing.T) {}\n'
-    FAIL = PASS.replace('{}', '{ t.Fatal("wrong value") }')
-    BROKEN = PASS.replace('{}', '{ undefinedName() }')
-    COMMAND = ["go", "test", "-count=1", "-run", "^TestCheck$", "."]
-
-    def seed(self, body):
-        self.write("go.mod", "module example.invalid/fixture\n\ngo 1.18\n")
-        self.write("calc_test.go", body)
-        self.contract({**CONTRACT, "checks": [{"name": "post", "argv": SUITE, "stage": "post_review"}]})
-        self.implement()
-        self.verified()
-        return review.brief(self.card, self.repo)
-
-    def legacy(self, body=PASS, old_fixture=BROKEN, with_post=False, post_exit=0, retired_pre=False):
-        packet = self.seed(body)
-        if retired_pre:
-            original = self.policy.read_bytes()
-            self.set_policy(base_probe=False, checks=[{"name": "retired", "argv": [PY, "-c", "raise SystemExit(1)"]}])
-            self.assertEqual(verify.verify(self.card, self.repo)[1], 1)
-            self.policy.write_bytes(original)
-        if with_post:
-            self.assertEqual(verify.verify(self.card, self.repo, stage="post_review")[1], post_exit)
-        key = self.report([self.blocker()])["to_confirm"][0]
-        folder = self.card.evidence("confirm", key, "1")
-        fixture = folder / "files" / "calc_test.go"
-        fixture.parent.mkdir()
-        fixture.write_text(old_fixture)
-        old = {}
-        for name in ("base", "candidate", "recheck-round-1"):
-            log = folder / (name + ".log")
-            with tempfile.TemporaryDirectory(dir=self.root) as scratch:
-                root = Path(scratch)
-                shutil.copyfile(self.repo / "go.mod", root / "go.mod")
-                shutil.copyfile(fixture, root / "calc_test.go")
-                code, problem, klass, seconds = verify.run(self.COMMAND, root, log, 30)
-            self.assertEqual(klass, "fail", log.read_text())
-            old[name] = {"exit_code": code, "problem": problem, "klass": klass, "seconds": seconds, "log": str(log)}
-        legacy_log = self.card.evidence("confirm", key) / "recheck-round-1.log"
-        Path(old["recheck-round-1"]["log"]).rename(legacy_log)
-        old["recheck-round-1"]["log"] = str(legacy_log)
-        with self.card.locked() as state:
-            entry = state["ledger"][key]
-            entry.update(status="confirmed", confirm={"tree": packet["tree"], "result": "confirmed", "argv": self.COMMAND,
-                         "files": {"calc_test.go": str(fixture)}, "files_sha256": {"calc_test.go": verify.file_digest(fixture)},
-                         "candidate": old["candidate"], "base": old["base"]}, attempts=[{"round": 1, "result": "confirmed"}])
-            state["rounds"][-1]["rechecks"] = [{"key": key, "fixed": False, **old["recheck-round-1"]}]
-        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
-        return {"key": key, "round_number": 1, "tree": packet["tree"], "old_sha256": verify.file_digest(legacy_log),
-                "test": "TestCheck", "owner_ref": "fixture-owner-message", "reason": "stale overlay"}
-
-    def supersede(self, options, **changes):
-        with patch.dict(os.environ, {"HERMES_KANBAN_TASK": "", "AI_DEV_ROLE": ""}):
-            return review.supersede_evidence(self.card, self.repo, **{**options, **changes})
-
-    def test_fresh_review_and_receipts_preserve_historical_round(self):
-        options = self.legacy(with_post=True)
-        before = self.card.load()
-        old_files = {path: path.read_bytes() for path in (self.card.dir / "evidence").rglob("*") if path.is_file()}
-        result = self.supersede(options)
-        self.assertEqual(result["status"], "fixed")
-        self.assertEqual(result["audit"]["replacement"]["tracked_test"], "calc_test.go")
-        self.assertEqual(result["audit"]["replacement"]["tracked_blob"],
-                         gitio.text(self.repo, "hash-object", "calc_test.go"))
-        self.assertEqual(self.card.load()["rounds"][0], before["rounds"][0])
-        self.assertEqual(self.card.load()["counters"], before["counters"])
-        self.assertEqual(self.card.load().get("attempt", 1), before.get("attempt", 1))
-        self.assertEqual(self.card.load()["ledger"][options["key"]]["confirm"], before["ledger"][options["key"]]["confirm"])
-        for path, contents in old_files.items():
-            self.assertEqual(path.read_bytes(), contents)
-        for tool in ("kanban_request_changes", "kanban_complete"):
-            with self.subTest(tool=tool):
-                self.assertIn("fresh", self.decide(tool, "reviewer") or "")
-        with self.assertRaisesRegex(CardError, "fresh round"):
-            review.settle(self.card, self.repo)
-        with self.assertRaisesRegex(CardError, "fresh accepted round"):
-            verify.verify(self.card, self.repo, stage="post_review")
-        with self.assertRaisesRegex(CardError, "passing verification"):
-            review.brief(self.card, self.repo)
-        self.verified()
-        packet = review.brief(self.card, self.repo)
-        self.assertEqual(packet["supersedes_round"], 1)
-        for tool in ("kanban_request_changes", "kanban_complete"):
-            with self.subTest(tool=tool):
-                self.assertIn("no settled review round", self.decide(tool, "reviewer") or "")
-        with self.assertRaisesRegex(CardError, "No report"):
-            review.settle(self.card, self.repo)
-        self.report([])
-        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
-        self.assertIn("post-review", self.decide("kanban_complete", "reviewer"))
-        self.assertEqual(verify.verify(self.card, self.repo, stage="post_review")[1], 0)
-        self.assertIsNone(self.decide("kanban_complete", "reviewer"))
-        self.assertEqual(self.card.load()["rounds"][0], before["rounds"][0])
-        self.assertIn("accept", self.decide("kanban_request_changes", "reviewer"))
-
-    def test_inconclusive_tracked_recheck_keeps_the_finding_blocking(self):
-        options = self.legacy()
-        original = self.card.load()["ledger"][options["key"]]["confirm"]
-        self.supersede(options)
-        self.verified()
-        review.brief(self.card, self.repo)
-        self.report([])
-        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
-        self.write("calc_test.go", self.PASS.replace("{}", '{ t.Skip("not exercised") }'))
-        self.verified()
-        packet = review.brief(self.card, self.repo)
-        self.assertEqual(packet["rechecks"][0]["klass"], "environment")
-        with self.assertRaisesRegex(CardError, "not waiting for confirmation"):
-            review.confirm(self.card, self.repo, options["key"], cannot="not exercised")
-        self.report([])
-        settled = review.settle(self.card, self.repo)
-        self.assertEqual(settled["blocking"], [options["key"]])
-        self.assertEqual(self.card.load()["ledger"][options["key"]]["confirm"], original)
-
-    def test_panel_route_refresh_keeps_repair_binding_and_checks_log(self):
-        options = self.legacy()
-        audit = self.supersede(options)["audit"]
-        self.verified()
-        original = review.brief(self.card, self.repo)
-        self.report([])
-        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
-        old_rounds = self.card.load()["rounds"]
-        replacement_log = Path(audit["replacement"]["log"])
-        contents = replacement_log.read_bytes()
-
-        def routes(*names):
-            self.set_policy(review={"panel_required": True, "author_model": "writer", "panel": [
-                {"name": name, "argv": [PY, "-c", "raise SystemExit(1)"], "model": name,
-                 "output": "hermes-usage" if name == "astra" else "claude-json"}
-                for name in names]})
-
-        routes("astra", "opus")
-        replacement_log.write_bytes(contents + b"tampered")
-        with self.assertRaisesRegex(CardError, "replacement log"):
-            review.brief(self.card, self.repo)
-        self.assertEqual(self.card.load()["rounds"], old_rounds)
-        replacement_log.write_bytes(contents)
-        first = review.brief(self.card, self.repo)
-        self.assertGreater(first["round"], original["round"])
-        self.assertEqual(first["supersedes_round"], options["round_number"])
-        self.assertEqual(first["mode"], "full")
-        self.assertEqual(self.card.load()["rounds"][:-1], old_rounds)
-
-        routes("astra", "sonnet")
-        second = review.brief(self.card, self.repo)
-        self.assertGreater(second["round"], first["round"])
-        self.assertEqual(second["supersedes_round"], options["round_number"])
-        self.assertEqual(second["mode"], "full")
-        self.assertEqual(second["panel"], ["astra", "sonnet"])
-        replacement_log.write_bytes(contents + b"tampered")
-        state = self.card.load()
-        settings = policy.load(repo=self.repo)
-        with self.assertRaisesRegex(CardError, "replacement log"):
-            review.independent_evidence(state, settings["review"], state["rounds"][-1])
-
-    def test_handoff_and_brief_require_the_same_repair_tree(self):
-        options = self.legacy()
-        self.supersede(options)
-        self.verified()
-        self.assertIsNone(self.decide("kanban_request_review", "coder"))
-        self.write("calc_test.go", self.PASS + "// another tree\n")
-        self.verified()
-        with self.assertRaisesRegex(CardError, "exact tree"):
-            review.brief(self.card, self.repo)
-        self.assertIn("exact tree", self.decide("kanban_request_review", "coder") or "")
-
-    def test_unrelated_passing_selector_cannot_clear_the_blocker(self):
-        self.write("unrelated_test.go", self.PASS.replace("TestCheck", "TestUnrelated"))
-        options = self.legacy(self.FAIL)
-        before = self.card.file.read_bytes()
-        with patch.object(verify, "run", wraps=verify.run) as run:
-            with self.assertRaisesRegex(CardError, "recorded reproduction"):
-                self.supersede(options, test="TestUnrelated")
-            run.assert_not_called()
-        self.assertEqual(self.card.file.read_bytes(), before)
-        self.assertEqual(self.card.load()["ledger"][options["key"]]["status"], "confirmed")
-        self.assertEqual(review.settle(self.card, self.repo)["blocking"], [options["key"]])
-
-    def test_same_selector_in_another_file_cannot_clear_the_blocker(self):
-        for body in (self.PASS.replace("TestCheck", "TestOther"),
-                     "//go:build ratchet_fixture_disabled\n\n" + self.PASS):
-            with self.subTest(body=body), tempfile.TemporaryDirectory(dir=self.root) as home, patch.dict(os.environ, {"AI_DEV_HOME": home}):
-                self.card = Card("test", "t_1")
-                self.write("other_test.go", self.PASS)
-                options = self.legacy(body)
-                result = self.supersede(options)
-                self.assertEqual(result["status"], "confirmed")
-                self.assertIn("calc_test.go", result["audit"]["replacement"]["problem"])
-                self.assertEqual(review.settle(self.card, self.repo)["blocking"], [options["key"]])
-
-    def test_retired_pre_review_defect_does_not_block_fresh_review(self):
-        options = self.legacy(retired_pre=True)
-        before = self.card.load()
-        old = before["verifications"][-1]
-        old_log = Path(old["checks"][0]["log"])
-        contents = old_log.read_bytes()
-        self.assertEqual(old["tree"], options["tree"])
-        self.assertEqual(self.supersede(options)["audit"]["receipt_floor"], old["id"])
-        settings = policy.load(repo=self.repo)
-        self.assertIsNone(verify.last_for(self.card.load(), options["tree"], "pre_review", settings))
-        self.assertEqual(recovery.recover(self.card, self.repo, "verification")[0]["action"], "none")
-        self.assertIn("no passing verification", self.decide("kanban_request_review", "coder"))
-        fresh = self.verified()
-        self.assertIsNone(self.decide("kanban_request_review", "coder"))
-        self.assertGreater(fresh["id"], old["id"])
-        self.assertEqual(fresh["tree"], old["tree"])
-        self.assertEqual(review.brief(self.card, self.repo)["supersedes_round"], 1)
-        self.report([])
-        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
-        after = self.card.load()
-        self.assertEqual(after["verifications"][:-1], before["verifications"])
-        self.assertEqual(after["rounds"][0], before["rounds"][0])
-        self.assertEqual(after.get("diagnoses"), before.get("diagnoses"))
-        self.assertEqual(after.get("attempt", 1), before.get("attempt", 1))
-        self.assertEqual(after["counters"], before["counters"])
-        self.assertEqual(old_log.read_bytes(), contents)
-
-    def test_fresh_pre_review_defect_is_actionable_only_under_applicable_checks(self):
-        options = self.legacy()
-        repair = self.supersede(options)["audit"]
-        self.set_policy(base_probe=False, checks=[{"name": "unit", "argv": [PY, "-c", "raise SystemExit(1)"]}])
-        fresh, code = verify.verify(self.card, self.repo)
-        self.assertEqual((fresh["tree"], code), (options["tree"], 1))
-        self.assertGreater(fresh["id"], repair["receipt_floor"])
-        self.assertIn("recover verification", self.decide("kanban_request_review", "coder"))
-        with self.assertRaisesRegex(CardError, "recover verification"):
-            verify.verify(self.card, self.repo)
-        request, _ = recovery.recover(self.card, self.repo, "verification")
-        self.assertEqual(request["action"], "dispatch")
-        self.assertIn(f'"receipt": {fresh["id"]}', request["repair_request"]["body"])
-        before = self.card.load()
-        self.set_policy()
-        settings = policy.load(repo=self.repo)
-        self.assertIsNone(verify.last_for(self.card.load(), options["tree"], "pre_review", settings))
-        self.assertEqual(recovery.recover(self.card, self.repo, "verification")[0]["action"], "none")
-        self.verified()
-        after = self.card.load()
-        self.assertEqual(after["verifications"][:-1], before["verifications"])
-        self.assertEqual(after.get("attempt", 1), before.get("attempt", 1))
-
-    def test_fresh_post_review_defect_uses_only_applicable_receipts(self):
-        self.set_policy(base_probe=False, checks=[{"name": "unit", "argv": SUITE},
-            {"name": "late", "argv": [PY, "-c", "raise SystemExit(1)"], "stage": "post_review"}])
-        options = self.legacy(with_post=True, post_exit=1)
-        old = self.card.load()["verifications"][-1]
-        self.assertEqual(self.supersede(options)["status"], "fixed")
-        self.assertEqual(recovery.recover(self.card, self.repo, "verification")[0]["action"], "none")
-        self.verified()
-        review.brief(self.card, self.repo)
-        self.report([])
-        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
-        self.assertIn("not passed", self.decide("kanban_complete", "reviewer"))
-        self.assertIn("no blocker", self.decide("kanban_request_changes", "reviewer"))
-        with self.card.locked() as state:
-            # Wrong-round and wrong-check receipts newer than the supersession are historical too.
-            for fields in ({"review_round": 1}, {"review_round": 2, "checks_digest": "obsolete"}):
-                state["verifications"].append({**old, "id": len(state["verifications"]) + 1, **fields})
-        self.assertIn("not passed", self.decide("kanban_complete", "reviewer"))
-        self.assertIn("no blocker", self.decide("kanban_request_changes", "reviewer"))
-        self.assertEqual(recovery.recover(self.card, self.repo, "verification")[0]["action"], "none")
-        fresh, code = verify.verify(self.card, self.repo, stage="post_review")
-        self.assertEqual((fresh["review_round"], code), (2, 1))
-        self.assertEqual(self.card.load()["verifications"][old["id"] - 1], old)
-        self.assertIn("kanban_request_changes", self.decide("kanban_complete", "reviewer"))
-        self.assertIn("recover verification", self.decide("kanban_request_changes", "reviewer"))
-        request, _ = recovery.recover(self.card, self.repo, "verification")
-        self.assertIn(f'"receipt": {fresh["id"]}', request["repair_request"]["body"])
-        self.assertEqual(self.diagnose("verification")["action"], "resume")
-        self.assertIsNone(self.decide("kanban_request_changes", "reviewer"))
-
-    def test_later_fix_brief_uses_tracked_recheck_not_legacy_overlay(self):
-        options = self.legacy()
-        before = self.card.load()
-        old_brief = Path(before["rounds"][0]["fix_brief"])
-        old_contents = old_brief.read_bytes()
-        self.assertEqual(self.supersede(options)["status"], "fixed")
-        self.verified()
-        review.brief(self.card, self.repo)
-        self.report([])
-        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "accept")
-        self.write("calc_test.go", self.FAIL)
-        self.verified()
-        packet = review.brief(self.card, self.repo)
-        recheck, = packet["rechecks"]
-        self.assertEqual(recheck["klass"], "fail")
-        self.assertIn("wrong value", Path(recheck["log"]).read_text())
-        self.report([])
-        settled = review.settle(self.card, self.repo)
-        self.assertEqual(settled["blocking"], [options["key"]])
-        brief = Path(settled["fix_brief"]).read_text()
-        self.assertIn(recheck["log"], brief)
-        self.assertIn("tracked test `calc_test.go`", brief)
-        self.assertIn("without an overlay", brief)
-        self.assertNotIn("copy:", brief)
-        self.assertEqual(old_brief.read_bytes(), old_contents)
-        self.assertEqual(self.card.load()["ledger"][options["key"]]["confirm"],
-                         before["ledger"][options["key"]]["confirm"])
-
-    def test_wrong_identity_refused_before_execution(self):
-        options = self.legacy()
-        original = self.card.file.read_bytes()
-        for changes in ({"tree": "f" * 40}, {"round_number": 2}, {"key": "different"}, {"old_sha256": "f" * 64}):
-            with self.subTest(changes=changes), patch.object(verify, "run") as run:
-                with self.assertRaises(CardError):
-                    self.supersede(options, **changes)
-                run.assert_not_called()
-                self.assertEqual(self.card.file.read_bytes(), original)
-
-    def test_supersession_cannot_drop_options_from_recorded_go_command(self):
-        options = self.legacy()
-        for argv in ([*self.COMMAND, "-tags=arithmetic"],
-                     ["go", "test", "-count=2", "-run", "^TestCheck$", "."],
-                     ["go", "test", "-run", "TestCheck", "."]):
-            with self.subTest(argv=argv):
-                with self.card.locked() as state:
-                    state["ledger"][options["key"]]["confirm"]["argv"] = argv
-                before = self.card.file.read_bytes()
-                with patch.object(verify, "run") as run:
-                    with self.assertRaisesRegex(CardError, "package and selector"):
-                        self.supersede(options)
-                    run.assert_not_called()
-                self.assertEqual(self.card.file.read_bytes(), before)
-
-    def test_genuine_legacy_failure_cannot_be_superseded(self):
-        options = self.legacy(old_fixture=self.FAIL)
-        before = self.card.file.read_bytes()
-        with self.assertRaisesRegex(CardError, "compile-only"):
-            self.supersede(options)
-        self.assertEqual(self.card.file.read_bytes(), before)
-
-    def test_failing_or_unexecuted_replacement_does_not_clear_blocker(self):
-        for body, test in ((self.FAIL, "TestCheck"), (self.BROKEN, "TestCheck"), (self.PASS.replace("TestCheck", "TestMissing"), "TestCheck")):
-            with self.subTest(body=body, test=test), tempfile.TemporaryDirectory(dir=self.root) as home, patch.dict(os.environ, {"AI_DEV_HOME": home}):
-                self.card = Card("test", "t_1")
-                options = self.legacy(body)
-                result = self.supersede(options, test=test)
-                self.assertEqual(result["status"], "confirmed")
-                self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
-
-    def test_confirm_does_not_overwrite_tracked_tests(self):
-        self.seed(self.PASS)
-        key = self.report([self.blocker()])["to_confirm"][0]
-        overlay = self.root / "fixture.go"
-        overlay.write_text(self.FAIL)
-        result = review.confirm(self.card, self.repo, key, files=[(str(overlay), "calc_test.go")], argv=self.COMMAND)
-        self.assertEqual(result["status"], "candidate")
-        with self.assertRaises(CardError):
-            review.settle(self.card, self.repo)
-        with self.assertRaisesRegex(CardError, "no behavioral result"):
-            review.confirm(self.card, self.repo, key, cannot="ignore the collision")
-
-    def test_cli_refuses_worker_then_runs_as_maintainer(self):
-        options = self.legacy()
-        cli = Path(__file__).resolve().parents[1] / "bin" / "ai-dev-card"
-        cmd = [PY, str(cli), "--card", self.card.id, "--board", self.card.board, "--workspace", str(self.repo),
-               "review", "supersede-evidence", "--finding", options["key"], "--round", "1", "--tree", options["tree"],
-               "--old-sha256", options["old_sha256"], "--test", options["test"], "--owner-ref", options["owner_ref"],
-               "--reason", options["reason"]]
-        before = self.card.file.read_bytes()
-        refused = subprocess.run(cmd, capture_output=True, text=True)
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("maintainer shell", refused.stderr)
-        self.assertEqual(self.card.file.read_bytes(), before)
-        env = {name: value for name, value in os.environ.items() if name not in ("AI_DEV_ROLE", "HERMES_KANBAN_TASK")}
-        done = subprocess.run(cmd, capture_output=True, text=True, env=env)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(json.loads(done.stdout)["status"], "fixed")
-        refused = subprocess.run(cmd, capture_output=True, text=True, env=env)
-        self.assertNotEqual(refused.returncode, 0)
-
-    def test_replacement_timeout_leaves_the_old_blocker(self):
-        options = self.legacy()
-        with patch.object(verify, "run", side_effect=lambda argv, cwd, log, timeout, env: (
-                log.touch(), (None, "Timed out", "environment", 0))[1]):
-            result = self.supersede(options)
-        self.assertEqual(result["status"], "confirmed")
-        self.assertEqual(result["audit"]["replacement"]["klass"], "environment")
-
-    def test_legacy_confirmed_go_recheck_preserves_test_options(self):
-        self._legacy_arithmetic_recheck("^TestArithmetic$", [], 1)
-
-    def test_legacy_confirmed_go_recheck_preserves_count_and_literal_selector(self):
-        self._legacy_arithmetic_recheck("TestArithmetic", ["-count=2"], 2)
-
-    def _legacy_arithmetic_recheck(self, selector, options, count):
-        # Record the proof as the old runner did, without Go JSON events.
-        # The build tag and the timeout both matter to this test's result.
-        def source(expected):
-            return f'''//go:build arithmetic
-
-package pkg
-import (
-    "flag"
-    "testing"
-)
-func TestArithmetic(t *testing.T) {{
-    if timeout := flag.Lookup("test.timeout").Value.String(); timeout != "30s" {{
-        t.Fatalf("wrong timeout: %s", timeout)
-    }}
-    if 2 + 2 != {expected} {{ t.Fatal("wrong sum") }}
-}}
-'''
-
-        self.write("go.mod", "module example.invalid/fixture\n\ngo 1.18\n")
-        self.write("pkg/calc_test.go", source(5))
-        self.contract()
-        self.implement()
-        self.git("add", "-A")
-        self.git("commit", "-qm", "Add arithmetic fixture")
-        self.verified()
-        first = review.brief(self.card, self.repo)
-        key = self.report([self.blocker(location="pkg/calc_test.go:12")])["to_confirm"][0]
-        argv = ["go", "test", "-run", selector, "-timeout=30s", "-tags", "arithmetic", *options, "./pkg"]
-        log = self.card.evidence("confirm", key, "1") / "candidate.log"
-        code, problem, klass, seconds = verify.run(argv, self.repo, log, 30)
-        self.assertEqual((code, klass), (1, "fail"))
-        original_log = log.read_bytes()
-        self.assertIn(b"wrong sum", original_log)
-        proof = {"tree": first["tree"], "result": "confirmed", "argv": argv, "files": {},
-                 "candidate": {"exit_code": code, "problem": problem, "klass": klass,
-                               "seconds": seconds, "log": str(log)}}
-        with self.card.locked() as state:
-            state["ledger"][key].update(status="confirmed", confirm=proof,
-                                        attempts=[{"round": 1, "result": "confirmed"}])
-        self.assertEqual(review.settle(self.card, self.repo)["outcome"], "changes")
-        old_round = self.card.load()["rounds"][0]
-        self.diagnose()
-        self.write("pkg/calc_test.go", source(4))
-        self.git("add", "-A")
-        self.git("commit", "-qm", "Fix expected sum")
-        self.verified()
-        second = review.brief(self.card, self.repo)
-        recheck, = second["rechecks"]
-        self.assertEqual((recheck["key"], recheck["klass"], recheck["fixed"]), (key, "pass", True), recheck)
-        events = [json.loads(line) for line in Path(recheck["log"]).read_text().splitlines()]
-        self.assertEqual([e["Action"] for e in events if e.get("Test") == "TestArithmetic"
-                          and e["Action"] != "output"], ["run", "pass"] * count)
-        state = self.card.load()
-        self.assertEqual(state["ledger"][key]["status"], "fixed")
-        self.assertEqual(state["ledger"][key]["confirm"], proof)
-        self.assertEqual(state["rounds"][0], old_round)
-        self.assertEqual(log.read_bytes(), original_log)
-
-    def test_literal_go_selector_matching_multiple_tests_is_inconclusive(self):
-        self.seed(self.FAIL + "func TestCheckExtra(t *testing.T) {}\n")
-        key = self.report([self.blocker()])["to_confirm"][0]
-        result = review.confirm(self.card, self.repo, key,
-                                argv=["go", "test", "-count", "2", "-run", "TestCheck", "."])
-        self.assertEqual(result["status"], "candidate")
-        candidate = result["proof"]["candidate"]
-        self.assertEqual(candidate["klass"], "environment")
-        self.assertIn('"Test":"TestCheckExtra"', Path(candidate["log"]).read_text())
-
-    def test_confirmation_distinguishes_go_failure_and_non_execution(self):
-        skipped = self.PASS.replace('{}', '{ t.Skip("not run") }')
-        for body, test, expected in ((self.FAIL, "TestCheck", "confirmed"), (self.BROKEN, "TestCheck", "candidate"),
-                                     (skipped, "TestCheck", "candidate"), (self.PASS, "TestMissing", "candidate")):
-            with self.subTest(test=test, expected=expected), tempfile.TemporaryDirectory(dir=self.root) as home, patch.dict(os.environ, {"AI_DEV_HOME": home}):
-                self.card = Card("test", "t_1")
-                self.seed(body)
-                key = self.report([self.blocker()])["to_confirm"][0]
-                result = review.confirm(self.card, self.repo, key,
-                                        argv=["go", "test", "-run", f"^{test}$", "-count=2", "-timeout=30s", "."])
-                self.assertEqual(result["status"], expected)
 
 
 class PackageDelivery(CardCase):
