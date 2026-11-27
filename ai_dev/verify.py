@@ -121,12 +121,11 @@ def manual_evidence(card, state, tree):
     return proofs
 
 
-def run(argv, cwd, log_path, timeout, env_overrides=None):
+def run(argv, cwd, log_path, timeout):
     """Returns (exit_code, problem, klass, seconds). klass is pass, fail, or environment when the command could not run."""
     started = time.monotonic()
     with open(log_path, "wb") as log:
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        env.update(env_overrides or {})
         try:
             process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log,
                                        stderr=subprocess.STDOUT, start_new_session=True)

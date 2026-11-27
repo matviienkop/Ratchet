@@ -42,7 +42,7 @@ DEFAULTS = {
     "pr_ci": None,
     "require_scenario_evidence": True,
     "review": {"max_rounds": 5, "author_model": None, "primary_model": None, "reviewer": "reviewer", "panel": [OPENAI_PANEL, CLAUDE_PANEL], "panel_required": True,
-               "panel_timeout": 1200, "max_prompt_bytes": 400_000, "confirm_timeout": 600},
+               "panel_timeout": 1200, "max_prompt_bytes": 400_000, "confirm_timeout": 600, "reproduction_adapter": []},
 }
 
 
@@ -118,6 +118,10 @@ def load(repo=None, origin=None):
     review = result["review"]
     if set(review) - set(DEFAULTS["review"]):
         raise CardError(f"Policy file {path} has unknown review settings.")
+    adapter = review["reproduction_adapter"]
+    if (not isinstance(adapter, list) or any(not isinstance(a, str) or not a for a in adapter)
+            or (adapter and not Path(adapter[0]).is_absolute())):
+        raise CardError("review.reproduction_adapter needs an absolute executable and optional arguments; run ai-dev-card doctor.")
     for key in ("max_rounds", "panel_timeout", "max_prompt_bytes", "confirm_timeout"):
         if type(review[key]) is not int or review[key] < 1:
             raise CardError(f"Policy file {path}: review.{key} must be a positive integer.")

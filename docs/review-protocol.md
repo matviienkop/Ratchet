@@ -13,10 +13,11 @@ The protocol exists to end one failure: a green candidate that a reviewer return
    | criterion or scenario | fails | any | `confirmed` |
    | regression | fails | passes | `confirmed` |
    | regression | fails | fails | `discovery` |
-   | any | passes | any | `disproved` |
-   | any | could not run | | `unconfirmed` |
+   | previously confirmed | passes | any | `fixed` |
+   | never confirmed | passes | any | `disproved` |
+   | any | inconclusive | | remains `candidate`; retry or record an allowed disposition |
 
-   A reviewer who cannot write the test records `--cannot-reproduce REASON`. The finding becomes `unconfirmed`: listed for the owner, not blocking.
+   For a finding never confirmed, a reviewer who cannot establish a reproduction records `--cannot-reproduce REASON`. It becomes `unconfirmed`, remains listed for disposition, and does not block round settlement by itself. Previously confirmed findings cannot use this route.
 
    Only a `candidate` can be confirmed. A confirmed blocker leaves that state through a fix that makes its reproduction pass, or through the owner's waiver; a reviewer cannot withdraw it.
 4. **Gaps.** `kind: gap` says a criterion has no proof at all. In round 1, the coordinator must inspect the contract and cite independent repository or verification evidence before a gap can block. It remains open across silent rounds. Close it with `finding resolve KEY --outcome resolved --reason TEXT --evidence FILE` using evidence for the current candidate, or obtain an owner waiver. The round cap still applies.
@@ -44,7 +45,7 @@ A low-rated finding is advisory. If all raw ratings are low, promotion into a bl
 
 ## Outcome
 
-`ai-dev-card review settle` refuses while a candidate has no confirmation attempt. Then:
+`ai-dev-card review settle` refuses while any finding remains a blocker candidate. Then:
 
 | Open confirmed blockers or gaps | Round | Outcome | Board call |
 | --- | --- | --- | --- |
@@ -178,70 +179,55 @@ An author is excluded by model family for the entire card. This includes fallbac
 GPT-6.2 Sol is an explicitly approved reserve for either slot. It can replace an unavailable Claude reviewer while the other independent reviewer remains active. The configured tier expresses review policy, not a benchmark result.
 
 
-## Repairing a settled Go overlay incident
+## Reproductions and changed test files
 
-Go confirmation and ordinary rechecks use one local package and one named
-top-level test, for example
-`ai-dev-card confirm --finding KEY -- go test ./pkg -run '^TestName$' -timeout=30s`.
-Ratchet requests JSON output and disables the test cache. It preserves a positive
-decimal `-count` (default 1), `-timeout`, `-tags`, `-parallel`, `-shuffle`, `-vet`,
-`-short`, `-race` and `-cover`. Each option may appear once. A bare test name is
-replayed with Go's original substring semantics, but is conclusive only if
-exactly that top-level test runs and finishes the requested number of times.
-A selector that also runs another top-level test is inconclusive. Other options
-and selectors are not replayed silently. The runner uses the local Go toolchain and cached or vendored
-dependencies, without using Go environment config, `GOFLAGS` or workspace mode.
+Reproductions run in disposable checkouts of the candidate and base. Stored test
+files may add a file or match a tracked file byte for byte. They never overwrite
+a different tracked file. When a fix changes the file at a stored test's path, the finding
+returns to `candidate` with a `reconfirm` entry in the review brief. The reviewer
+checks that the test still exercises the original claim, then runs `confirm`
+using the candidate's test without `--file`, or supplies a corrected reproduction
+at a new path. A passing rerun marks a previously confirmed finding `fixed`.
+The prior confirmation and logs remain in the card's evidence history.
 
-A compile or setup failure, timeout, skipped test, or zero tests leaves the finding
-unresolved. A fixture may add a new file but may not replace a checked-out path.
-When the destination already contains a byte-identical regular tracked file,
-Ratchet uses that file without rewriting it. If a new confirmation is inconclusive,
-fix the reproduction and run `confirm` again. If an already confirmed finding has
-an inconclusive recheck, it remains blocking. Inspect the recheck log and bring
-unsupported stored commands to the maintainer and owner rather than stripping
-flags or treating the finding as fixed. This classification applies to direct
-`go test`, not commands that wrap the Go runner.
+An unsuccessful attempt does not prove a defect. A finding that has never been
+confirmed may be marked `unconfirmed` with `confirm --cannot-reproduce REASON`.
+It remains visible and still requires the applicable finding disposition before
+completion. A previously confirmed finding needs a conclusive rerun or an
+owner-approved waiver; a tool failure cannot withdraw it.
 
-For the narrow legacy case where a single stale Go overlay is the sole confirmed
-blocker of the latest settled `changes` round, a maintainer with local card-state
-access and explicit owner approval may run:
+### Project reproduction adapter
 
-```sh
-ai-dev-card --card CARD --board BOARD --workspace REPO review supersede-evidence \
-  --finding KEY --round N --tree TREE --old-sha256 SHA256 \
-  --test TestName --owner-ref MESSAGE --reason TEXT
+The core does not parse language commands or test output. Configure an
+operator-maintained adapter in the repository's policy when the test runner's
+exit codes do not distinguish assertion failures from build or setup failures:
+
+```json
+{"review": {"reproduction_adapter": ["/absolute/path/to/project-reproduction"]}}
 ```
 
-`SHA256` is the digest of the stored recheck log for that exact round. The owner
-message must approve the finding, tree, old log and named replacement test. Run
-outside the Kanban worker or role-specific environment. This is a local privileged
-operation, not a new authentication mechanism: the reference records approval;
-Ratchet does not fetch or authenticate the owner message. The operator must check
-that the tracked test covers the same behavior before running the command. The
-rerun uses the recorded commit and the same tracked destination, package and exact
-named selector as the recorded reproduction. This path does not accept the extra
-options supported by ordinary Go confirmation and recheck. Go's build file list and source parser
-must identify a unique declaration in that exact tracked file; the audit records the
-file and Git blob. A matching name in another file, or a matching declaration excluded
-by build constraints, does not qualify. The test runs without an overlay, using an
-offline Go toolchain with dependencies already available locally. Unsupported or mixed
-legacy logs and changed hashes are refused. A replacement failure or inconclusive
-run is logged but leaves the blocker in place.
+Ratchet appends the reproduction argv to this prefix without a shell and runs it
+in the disposable checkout under the confirmation timeout. The adapter owns test
+discovery, output parsing, toolchain, module and environment rules. It writes the
+runner output to stdout/stderr, which Ratchet retains as evidence, and exits with
+0 for exercised behavior that passes, 1 for an exercised behavioral failure, or
+2 for an inconclusive run. Any other exit, missing tool or timeout is also
+inconclusive. A successful build or zero discovered tests must not return 0.
+The adapter must preserve the requested test selection and options or report
+an inconclusive run rather than silently dropping them. Install adapters outside
+the candidate checkout, under operator control. An empty prefix uses the command
+directly with the same exit-code contract. Saved evidence records the adapter and
+actual command; rechecks use the current project policy.
 
-A passing replacement preserves the original logs, fixtures, reports and verdict.
-It records an audited correction and requires new verification and a full review
-on the same tree, with the configured reviewer or independent panel. The old
-verdict cannot authorize a return or completion while the fresh round is pending.
-The coder gate and review brief both require the exact repaired tree until that
-review is underway; an open repaired round must also settle on that tree. If
-panel routes change, the next round on that tree is still a full review linked
-to the repair, and the replacement log must still match its audited digest.
-On later trees, an inconclusive tracked recheck leaves the finding blocking;
-`--cannot-reproduce` is not an alternative to a passing recheck or owner waiver.
-On the repaired tree, only receipts newer than the repair and matching the current
-checks for their stage can satisfy the gate or trigger recovery. Older or retired
-receipts remain in history. If policy requires post-review checks, rerun them after
-the new acceptance; only receipts bound to that accepted round apply. Later rechecks
-verify the same tracked path; a new fix
-brief cites the current recheck instead of directing anyone to restore the stale
-fixture. The command neither approves the candidate nor changes attempt limits or Kanban status.
+Language-specific adapters and their tests belong to the project, not Ratchet.
+Project onboarding must configure the adapter before reproductions are used as
+evidence. Include successful, failing, skipped, empty and build-error cases in
+its validation.
+
+### Compatibility with recorded evidence corrections
+
+The former `review supersede-evidence` migration command has been removed.
+Previously recorded corrections remain readable: their old logs, replacement
+hashes, receipt floors and exact-tree review requirements remain enforced.
+They do not authorize a new correction or waive later review. Subsequent test
+runs use the configured project adapter, including rechecks of those records.
